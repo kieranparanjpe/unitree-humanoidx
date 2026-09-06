@@ -1,0 +1,3 @@
+[submodule "unitree_rl_mjlab"]
+	path = unitree_rl_mjlab
+	url = https://github.com/kieranparanjpe/unitree_rl_mjlab.git
