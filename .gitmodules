@@ -2,3 +2,7 @@
 	path = unitree_rl_mjlab
 	url = https://github.com/kieranparanjpe/unitree_rl_mjlab.git
 	branch = h2_main
+[submodule "unitree_rl_lab"]
+	path = unitree_rl_lab
+	url = https://github.com/kieranparanjpe/unitree_rl_lab
+	branch = h2_main
