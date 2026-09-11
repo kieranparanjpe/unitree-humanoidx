@@ -24,18 +24,77 @@ Two things need to exist, and they're mostly independent of which robot:
 
 - The **description + `ros2_control` + Gazebo plugin** side is robot-specific asset work
   (URDF, joint list, plugin config) but not "AI" work — it's the same shape for every robot.
-- The **policy inference node** is new code regardless of robot: subscribe to
-  `/joint_states` + IMU + a velocity-command topic, build the observation vector in the
-  exact order/scale the Isaac Lab env used, run the ONNX policy at the trained control
-  rate, publish joint targets (doing the PD math yourself if using an effort controller,
-  same as the existing hardware deploy code does).
+- The **policy inference node** should NOT be hand-written per robot. Isaac Lab already has
+  a generic, data-driven mechanism for exactly this problem (see §2) — the node should be a
+  thin ROS2 wrapper around that same mechanism: a small named-term registry plus a
+  manifest-driven composer, not a hardcoded obs vector per robot.
 
 Note: this Gazebo path does **not** need `unitree_ros2`/DDS/`unitree_hg` at all — those are
 only relevant if we later want the *same* policy node to also drive real hardware, via a
 custom `ros2_control` hardware interface that translates to DDS. That's a follow-on, not a
 prerequisite for sim2sim.
 
-## 2. What already exists today, per component
+## 2. The observation/action contract mechanism (already solved — reuse it)
+
+This is the key finding that should drive the node's design. Isaac Lab's own MuJoCo/real-
+hardware sim2sim deploy path does not hand-maintain two copies (Python training config vs.
+C++ runtime) in sync. Instead:
+
+1. **A generic C++ runtime mirrors Isaac Lab's Python manager architecture term-for-term.**
+   `unitree_rl_lab/deploy/include/isaaclab/manager/observation_manager.h` and
+   `action_manager.h` reimplement Isaac Lab's `ObservationManager`/`ActionManager`. Each MDP
+   term (`base_ang_vel`, `projected_gravity`, `joint_pos_rel`, `velocity_commands`, etc.) is
+   hand-implemented **once** in
+   `deploy/include/isaaclab/envs/mdp/observations/observations.h` and self-registers into a
+   string-keyed lookup table via a `REGISTER_OBSERVATION(name)` macro — a name→function
+   registry mirroring Python's `mdp.<func>` module. This is per-term-type work, not
+   per-robot work.
+
+2. **A YAML manifest is auto-exported from the live training env, not hand-written.**
+   `unitree_rl_lab/source/unitree_rl_lab/unitree_rl_lab/utils/export_deploy_cfg.py` runs
+   automatically at the end of every training run (`scripts/rsl_rl/train.py:196`). It
+   introspects the *actual instantiated* `env.observation_manager`/`env.action_manager`
+   objects — term names, order, scale, clip, history_length, resolved joint gains/default
+   pose, command ranges — and writes `logs/.../params/deploy.yaml`. Because it reads live
+   objects instead of re-deriving from config classes, it cannot drift out of sync with
+   training.
+
+3. **The joint-order mapping is computed, not memorized.** `deploy.yaml`'s `joint_ids_map`
+   comes from `resolve_matching_names(asset.data.joint_names, joint_sdk_names,
+   preserve_order=True)` — matching Isaac Lab's internal joint order against a
+   `joint_sdk_names` list declared once per robot in its asset config
+   (`source/.../assets/robots/unitree.py`).
+
+4. **At runtime, the C++ side loads the YAML and dispatches by name** — no per-robot C++
+   code beyond pointing a `policy_dir` at the right log dir
+   (see `deploy/robots/h1/config/config.yaml`'s `Velocity.policy_dir`).
+
+**This already exists for H2, with zero extra Python-side work:**
+- `UNITREE_H2_CFG.joint_sdk_names` is already defined in `unitree.py`, explicitly sourced
+  from `unitree_sdk2`'s `H2JointIndex` enum (`example/h2/low_level/h2_ankle_swing_example.cpp`).
+- `unitree_rl_lab/logs/rsl_rl/unitree_h2_velocity/2026-09-10_22-04-06/params/deploy.yaml` is
+  already sitting in the repo, fully populated: H2's `joint_ids_map`, per-joint
+  stiffness/damping, default pose, and the complete observation/action term spec.
+
+**Design implication for the ROS2 node:** port the term registry (the small set of
+functions in `observations.h`/the action equivalent) into the node's language, and have the
+node parse `deploy.yaml` directly to build its observation/action pipeline — the same node
+then works for H1, H2, or any future Isaac Lab robot, with the manifest as the only
+per-robot input. This replaces the earlier idea of "port obs-construction logic from
+`State_RLBase.h`" — don't port the *specific* H1 logic, port the *generic mechanism*.
+
+**Open gap — mjlab has no equivalent manifest.** `unitree_rl_mjlab`'s exporter
+(`mjlab/rl/exporter_utils.py`) only embeds flat metadata in the `.onnx` (joint names, gains,
+default pose, action scale, an `observation_names` list) — it does not capture per-term
+scale/clip/history the way `deploy.yaml` does, and mjlab's H2 policy has a structurally
+different contract anyway (98-dim single-frame obs, 29 actions, includes a `phase` term —
+see prior analysis). If we ever want the same ROS2 node to run mjlab-trained checkpoints
+too, we'd need either (a) an mjlab-side exporter that produces a `deploy.yaml`-equivalent
+manifest, or (b) a separate adapter that reads the onnx metadata into the node's internal
+contract representation. Not required for the H1/H2 Isaac Lab path — flag as future work
+only if mjlab checkpoints need to be deployed this way.
+
+## 3. What already exists today, per component
 
 | Component | H1 | H2 |
 |---|---|---|
@@ -45,14 +104,16 @@ prerequisite for sim2sim.
 | Real-hardware DDS message set | `unitree_hg` (`LowCmd`/`LowState`, `MotorCmd[35]`), used by H1 in `unitree_ros2` | Same `unitree_hg` message set, used by H2 in `unitree_sdk2`/`unitree_sdk2_python` C++/Python examples — **not exampled in `unitree_ros2` itself**, but mechanically identical (31 motors fit in the same 35-slot array) |
 | C++ ONNX deploy reference (joint mapping, PD gains, obs assembly) | `unitree_rl_lab/deploy/robots/h1/main.cpp` + `unitree_rl_lab/deploy/robots/h1_2/main.cpp` — **working reference** | **Does not exist** — no `deploy/robots/h2` in `unitree_rl_lab` or `unitree_rl_mjlab` |
 | Isaac Lab / mjlab training config (joint names, gains, default pose, obs/action spec) | Exists per-robot in both repos | `unitree_rl_lab/unitree_rl_lab/tasks/locomotion/robots/h2/velocity_env_cfg.py`, `unitree_rl_mjlab/src/assets/robots/unitree_h2/h2_constants.py`, `unitree_rl_mjlab/src/tasks/velocity/config/h2` — all present |
+| Auto-exported `deploy.yaml` manifest (joint_ids_map, gains, obs/action term spec) | Exists per H1 training run (e.g. `deploy/robots/g1_29dof/.../deploy.yaml` checked in as a worked example for G1) | **Already exists**: `unitree_rl_lab/logs/rsl_rl/unitree_h2_velocity/2026-09-10_22-04-06/params/deploy.yaml` |
 
 **Key takeaway:** the Gazebo/`ros2_control` gap is identical for H1 and H2 — nobody has
 built it for either. H1's advantage is narrower than "everything is set up": it has a
-**working C++ deploy reference** (`deploy/robots/h1`) to copy the obs/action/gain logic
-from, and a documented DDS path. H2 has the training-side config fully specified, but no
-deploy reference yet.
+**working C++ deploy reference** (`deploy/robots/h1`) to copy the *pattern* from, and a
+documented DDS path. H2 has the training-side config, `joint_sdk_names`, and the exported
+`deploy.yaml` manifest all already in place — it's missing only the deploy reference
+implementation and the Gazebo/`ros2_control` wiring, same as H1.
 
-## 3. H1 path (reference case)
+## 4. H1 path (reference case)
 
 1. Add `<ros2_control>` + `gazebo_ros2_control` (or `gz_ros2_control`, depending on Gazebo
    version) tags to `h1_description`'s URDF/xacro. Declare position/velocity/effort
@@ -60,45 +121,50 @@ deploy reference yet.
 2. Write a `ros2_control` controller YAML (`joint_state_broadcaster` +
    effort/position controller) and a bring-up launch file that spawns Gazebo, the
    controller manager, and the controllers.
-3. Write the policy node. Port the obs-construction, action-scaling, and PD-gain logic
-   directly from `unitree_rl_lab/deploy/include/FSM/State_RLBase.h` and
-   `deploy/robots/h1/main.cpp` — joint order, default pose, and gains are already solved
-   there; the only change is the transport (ROS2 topics instead of the DDS/SDK channel
-   objects).
+3. Write the policy node as a **manifest-driven composer**: port the small term registry
+   (mirroring `deploy/include/isaaclab/envs/mdp/observations/observations.h` and the action
+   equivalent) into the node's language, then have it parse H1's `deploy.yaml` to build the
+   observation vector / joint mapping / PD gains — not a hardcoded H1-specific
+   implementation. The only change from the existing C++ deploy pattern is the transport
+   (ROS2 topics instead of the DDS/SDK channel objects).
 4. Validate: joint order, action scale, control decimation, and default pose against the
    Isaac Lab H1 env config — this is a direct diff against a known-working reference, not
    guesswork.
 
-This is the template for every other robot, H2 included.
+Because the node is manifest-driven, this is the template for every other robot, H2
+included — step 3 does not need to be redone, only re-pointed at a different `deploy.yaml`.
 
-## 4. H2 gap: what's unknown, and how to resolve each unknown
+## 5. H2 gap: what's unknown, and how to resolve each unknown
 
 | Unknown | How to resolve it | Template / source to copy from |
 |---|---|---|
-| Joint order used by the trained policy | Read directly from the training config — no ambiguity | `unitree_rl_mjlab/src/assets/robots/unitree_h2/h2_constants.py` (actuator groups, regex joint names), `unitree_rl_lab/.../robots/h2/velocity_env_cfg.py` |
-| PD gains (kp/kd), effort limits, action scale | Already numeric constants in the mjlab config; carries over 1:1 into the policy node's PD math | `h2_constants.py:39-100` (per-group stiffness/damping/effort_limit), `h2_constants.py:187-195` (action scale formula) |
-| Default/home joint pose (obs zero-reference) | Already defined | `h2_constants.py:107-119` (`HOME_KEYFRAME`) |
-| Mapping between training joint order and the real motor index order | Build a static name→index permutation array once, by matching joint names between the two known lists | Training order: files above. Motor order: `H2JointIndex` enum in `unitree_sdk2`'s `example/h2/low_level/h2_ankle_swing_example.cpp` (31 motors, 0–30) — **only needed once we wire a real/DDS backend, not for pure Gazebo sim** |
+| Joint order used by the trained policy | **Already resolved** — captured in `deploy.yaml`'s term order and `joint_ids_map` | `unitree_rl_lab/logs/rsl_rl/unitree_h2_velocity/2026-09-10_22-04-06/params/deploy.yaml` |
+| PD gains (kp/kd), effort limits, action scale | **Already resolved** — numeric values in `deploy.yaml`, sourced from the live training env | Same `deploy.yaml`; also `unitree_rl_mjlab/src/assets/robots/unitree_h2/h2_constants.py:39-100` for the mjlab-side equivalents |
+| Default/home joint pose (obs zero-reference) | **Already resolved** — in `deploy.yaml`'s `default_joint_pos` | Same `deploy.yaml`; `h2_constants.py:107-119` (`HOME_KEYFRAME`) for mjlab |
+| Mapping between training joint order and the real motor index order | **Already resolved** — `deploy.yaml`'s `joint_ids_map`, computed by name-matching against `UNITREE_H2_CFG.joint_sdk_names` | `unitree.py`'s `UNITREE_H2_CFG.joint_sdk_names` (sourced from `H2JointIndex` in `unitree_sdk2`'s `example/h2/low_level/h2_ankle_swing_example.cpp`) — **only exercised once a real/DDS backend is added, not for pure Gazebo sim** |
 | Whether the H2 URDF's joint names match the MJCF/USD names used in training | Direct diff — both already exist, nothing to derive experimentally | `unitree_ros/robots/h2_description` (URDF) vs `h2_constants.py`'s `h2.xml` (MJCF) vs `unitree_model/H2/H2_dae.usd` |
-| No working C++ deploy reference for H2 (unlike H1) | Write `deploy/robots/h2/main.cpp` following the H1/H1_2 pattern, populated with H2's gains/joint list instead of H1's — mechanical port, not new design | `unitree_rl_lab/deploy/robots/h1/main.cpp`, `deploy/robots/h1_2/main.cpp` as templates |
+| No working C++ deploy reference for H2 (unlike H1) | Write `deploy/robots/h2/main.cpp` following the H1/H1_2 pattern — now largely mechanical since `deploy.yaml` already supplies every per-robot value | `unitree_rl_lab/deploy/robots/h1/main.cpp`, `deploy/robots/h1_2/main.cpp` as templates |
 | Whether the `mode_pr`/`mode_machine` low-level-control handshake behaves the same for H2 as H1 over DDS | Only relevant once a real-hardware/DDS backend is added later; the handshake logic is already demonstrated | `h2_ankle_swing_example.cpp`'s `LowCommandWriter()` (sets `mode_pr`/`mode_machine`, mirrored from `LowState_`) |
 | Whether `unitree_ros2` needs any change to carry H2 traffic | Almost certainly none — `unitree_hg`'s `LowCmd`/`LowState` already has a 35-motor array and H2 uses 31; same topics (`rt/lowcmd`, `rt/lowstate`, `rt/secondary_imu`) as H1 | Verify by publishing/subscribing `unitree_hg` messages from a ROS2 node against a real or simulated H2 once available — this is the one item that's genuinely unverified rather than just "look it up" |
 
-## 5. Milestones
+## 6. Milestones
 
-1. Get the H1 Gazebo path working end-to-end (URDF wiring, controller config, policy
-   node, launch) — this de-risks the generic (non-robot-specific) parts of the pipeline.
-2. Port `deploy/robots/h2` in `unitree_rl_lab`/`unitree_rl_mjlab` (C++, DDS/SDK-based) —
-   independent of ROS2/Gazebo, but produces the validated joint-mapping/gain logic to
-   reuse in step 3, and is useful on its own for real-hardware or mujoco-only deploy.
-3. Repeat the H1 Gazebo steps for H2, substituting `h2_description`'s URDF and the
-   config/gains from `h2_constants.py` / `velocity_env_cfg.py`.
-4. (Follow-on, not required for sim2sim) Add a custom `ros2_control` hardware interface
-   that speaks `unitree_hg` DDS, so the same policy node built in step 3 can also drive
-   real H2 hardware — this is where the `H2JointIndex` mapping and `mode_pr`/`mode_machine`
+1. Get the H1 Gazebo path working end-to-end (URDF wiring, controller config, launch).
+2. Build the **manifest-driven policy node**: port the term registry + a `deploy.yaml`
+   parser as generic, robot-agnostic code — this is the piece that pays off for every robot,
+   not just H1. Validate it against H1's `deploy.yaml` first since there's a working C++
+   reference to cross-check against.
+3. Port `deploy/robots/h2` in `unitree_rl_lab`/`unitree_rl_mjlab` (C++, DDS/SDK-based) —
+   independent of ROS2/Gazebo, useful on its own for real-hardware/mujoco-only deploy, and a
+   good cross-check for the manifest-driven node's H2 output.
+4. Repeat the Gazebo URDF/`ros2_control` wiring for H2 (`h2_description`), and point the
+   same policy node from step 2 at H2's already-existing `deploy.yaml`.
+5. (Follow-on, not required for sim2sim) Add a custom `ros2_control` hardware interface
+   that speaks `unitree_hg` DDS, so the same policy node can also drive real H2 hardware —
+   this is where the `H2JointIndex`/`joint_ids_map` mapping and `mode_pr`/`mode_machine`
    handshake actually get used.
 
-## 6. Validation checklist (applies to both H1 and H2)
+## 7. Validation checklist (applies to both H1 and H2)
 
 - [ ] Joint name/order parity between training config and URDF/`ros2_control` joint list
 - [ ] Same PD gains (or equivalent effort-mode math) as training
@@ -107,3 +173,6 @@ This is the template for every other robot, H2 included.
 - [ ] Same default/home pose used as the observation's zero-reference
 - [ ] Same gravity/angular-velocity frame convention (base frame vs. world frame) in the
       observation construction
+- [ ] The manifest-driven node's computed observation vector matches the C++ deploy
+      reference's output bit-for-bit given the same simulated state (a strong, cheap
+      correctness check before ever running the policy for real)
