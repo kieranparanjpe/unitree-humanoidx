@@ -22,3 +22,7 @@
 [submodule "unitree_sdk2_python"]
 	path = unitree_sdk2_python
 	url = https://github.com/unitreerobotics/unitree_sdk2.git_python
+[submodule "unitree_ros2_gazebo"]
+	path = unitree_ros2_gazebo
+	url = https://github.com/kieranparanjpe/unitree_ros2_gazebo.git
+	branch = main

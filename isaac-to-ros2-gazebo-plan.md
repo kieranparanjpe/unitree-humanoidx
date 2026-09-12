@@ -164,7 +164,60 @@ included — step 3 does not need to be redone, only re-pointed at a different `
    this is where the `H2JointIndex`/`joint_ids_map` mapping and `mode_pr`/`mode_machine`
    handshake actually get used.
 
-## 7. Validation checklist (applies to both H1 and H2)
+## 8. ROS2 + Gazebo package structure (decided 2026-09-12)
+
+Target stack: **ROS2 Jazzy + Gazebo Harmonic**, confirmed installed on this machine as
+`gz sim` 8.15.0. The bridge plugin is `gz_ros2_control` (the Gazebo Sim / "gz" generation),
+**not** `gazebo_ros2_control`, which targets EOL Gazebo Classic and isn't relevant here.
+
+**Finding: `unitree_ros`'s description packages can't be reused directly.**
+`unitree_ros/robots/h1_description/package.xml` is `format="2"` with
+`<buildtool_depend>catkin</buildtool_depend>` and a catkin `CMakeLists.txt` — a ROS1 package,
+not buildable in a ROS2/colcon workspace. `h2_description` isn't even a package (no
+`package.xml`/`CMakeLists.txt` at all, just loose URDF + meshes). New ament_cmake
+description packages must be authored from scratch; they can reference the existing mesh
+files, but not the packages themselves.
+
+**New repo: `unitree_ros2_gazebo`**, added as a submodule and symlinked whole into a sibling
+`jazzy_ws/src/` (jazzy_ws lives next to this repo, not inside it). It holds three separate
+colcon packages:
+
+- **`unitree_gz_description`** — a generic `generate_urdf.py` that takes a bare URDF path and
+  a `deploy.yaml` path, and programmatically injects the `<ros2_control>` tag (one
+  `<joint>` block per motor, sourced from `deploy.yaml`'s joint list) plus the
+  `gz_ros2_control` plugin block. Per-robot input is a small `robots/<name>.yaml` pointer
+  file (`urdf_path`, `deploy_yaml_path`, `mesh_path`) — nothing else. This mirrors Isaac
+  Lab's own pattern of pointing an asset config at a path rather than hand-authoring
+  per-robot xacro/boilerplate; adding a new robot later means adding one pointer YAML, not a
+  new package. Scope right now is H2 only — the mechanism is written generic, but no other
+  robot's pointer file needs to exist yet.
+- **`unitree_gz_bringup`** — launch files (`robot:=h2` arg): spawns Gazebo, spawns the robot
+  entity, spawns `joint_state_broadcaster` + a raw effort passthrough controller.
+- **`unitree_policy_bridge`** — the manifest-driven policy node from §2 (deploy.yaml parser +
+  term registry + ONNX inference), robot-agnostic.
+
+**Control interface decision: effort, with PD computed in `unitree_policy_bridge` itself**,
+not Gazebo's own position-controller PID loop. Verified from the actual H1 deploy reference
+(`unitree_rl_lab/deploy/robots/h1/src/State_RLBase.cpp:30`): each control step it writes only
+`.q()` (target position) to the motor command — the policy's action space is position
+targets, and the PD-to-torque conversion happens downstream (onboard motor firmware on real
+hardware; Isaac Lab's implicit-PD actuator model in training). Reproducing that PD math
+ourselves in `unitree_policy_bridge`, using `deploy.yaml`'s `kp`/`kd` directly, matches both
+of those exactly and is bit-for-bit checkable against the H1 C++ reference (per the §7
+checklist's last item) — relying on Gazebo's own internal PID loop would not have that
+guarantee, since its timing/discretization isn't tied to Isaac Lab's actuator model. Use
+`forward_command_controller`/`effort_controllers` (raw torque passthrough) as the
+`ros2_control` controller, not `joint_trajectory_controller` or anything PID-based.
+
+**Dependency audit (2026-09-12): no new apt packages needed.** Already installed on this
+machine: `ros-jazzy-ros-gz-sim`/`ros-jazzy-ros-gz-bridge`, `ros-jazzy-gz-ros2-control`
+(1.2.20), `ros-jazzy-ros2-control`/`ros-jazzy-ros2-controllers`/`ros-jazzy-controller-manager`,
+`ros-jazzy-effort-controllers`/`ros-jazzy-forward-command-controller`,
+`ros-jazzy-joint-state-broadcaster`. ONNX Runtime 1.22.0 is already vendored at
+`unitree_rl_lab/deploy/thirdparty/onnxruntime-linux-x64-1.22.0/` — `unitree_policy_bridge`
+should link against that copy rather than fetching its own.
+
+## 9. Validation checklist (applies to both H1 and H2)
 
 - [ ] Joint name/order parity between training config and URDF/`ros2_control` joint list
 - [ ] Same PD gains (or equivalent effort-mode math) as training
