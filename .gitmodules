@@ -9,3 +9,7 @@
 [submodule "unitree_model"]
 	path = unitree_model
 	url = https://huggingface.co/datasets/unitreerobotics/unitree_model
+[submodule "unitree_ros2"]
+	path = unitree_ros2
+	url = https://github.com/kieranparanjpe/unitree_ros2.git
+	branch = h2_main
