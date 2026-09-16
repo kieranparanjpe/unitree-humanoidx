@@ -20,6 +20,12 @@ ROS 2 Jazzy + Gazebo Harmonic.
 | Walking (`linear.x = 0.5`) | ≈0.41 m/s with `unitree_isaac_policy`, ≈0.36 m/s with the bridge | earlier session, not re-measured |
 | Turning (`angular.z = 0.2`) | ~0.03 rad/s achieved — poor, see Open items | earlier session |
 
+The rows above describe the checkpoint the stack was brought up on. A later H2 retrain
+(2026-09-16, the first with a `gait_phase` observation) **regressed**: unchanged yaw tracking,
+marching in place at zero command, and a leftward veer walking straight. All three are
+training-side — see *H2 retrain config*. The deploy path reproduces faithfully what the policy
+learned; it is not implicated.
+
 ## Root cause 1: `deploy.yaml` is not uniformly ordered
 
 From `unitree_rl_lab/.../utils/export_deploy_cfg.py:30-36`:
@@ -219,15 +225,118 @@ nothing. Don't use either.
 blocking service requests — subscribing to gz's `/stats` made every `/world/<w>/control` and
 `/world/<w>/state` request time out. Don't add one.
 
+## H2 retrain config (2026-09-16) and the `env->command` side channel
+
+Two things changed together: H2's Isaac Lab reward/command config, and one shared header in
+`unitree_rl_lab/deploy`. They are coupled — the config change is only correct if the deploy
+change ships with it. Written but **not yet trained or run**.
+
+### Why the 2026-09-16 checkpoint regressed
+
+- **Yaw was never trained wide.** `ranges.ang_vel_z` sat at ±0.1 for the whole run.
+  `limit_ranges` is only a ceiling the curriculum grows toward, and the sole registered command
+  curriculum, `lin_vel_cmd_levels`, advances `lin_vel_x`/`lin_vel_y` and nothing else
+  (`unitree_rl_lab/.../locomotion/mdp/curriculums.py:26-35`). An `ang_vel_cmd_levels` sits right
+  beside it, registered by no robot. Meanwhile `export_deploy_cfg` exports **`limit_ranges`**, so
+  `deploy.yaml` advertised ±0.5 and `policy_node` clamped `/cmd_vel` to a range 5× wider than
+  training ever sampled. Widening `limit_ranges` alone — which an earlier session did, believing
+  it was the fix — changes nothing about training and *widens* the train/deploy gap.
+- **Marching in place at zero command.** `gait_phase` was an ungated clock, so the observation
+  vector was periodic with no command given, and nothing in the reward set opposed a periodic
+  output: `feet_gait` gates *itself* off below `‖cmd‖ = 0.1`, `track_lin_vel_xy` is satisfied by
+  marching (net velocity ≈ 0), and `rel_standing_envs` was 0.02 so the regime was barely trained.
+  `feet_contact_without_cmd` exists in `rewards.py` and is registered by no robot; mjlab's
+  equivalent, `stand_still`, is what makes its H2 stand.
+- **`feet_clearance` at weight 20 was a bonus, not a penalty.** `foot_clearance_reward` is
+  `exp(-Σ(z−h)²·tanh(2|v_xy|)/std)` — it *peaks* when the feet are still. At weight 20 it paid
+  ~20/step for standing, and pivoting the feet near the ground cost more than `track_ang_vel_z`
+  (max 0.5) could pay back, so turning in place was net-negative.
+- **Veering** is the weakest of the three diagnoses. Nothing observes heading
+  (`heading_command=False`, no yaw term in either obs group), so straight walking is open-loop in
+  yaw and any gait asymmetry integrates freely. What tipped it is likely `flat_orientation_l2`
+  −5.0 → −1.0 together with `ang_vel_xy_l2` −0.05 → −0.5: a static tilt got cheap at the same
+  time as correcting one got expensive. Not addressed below.
+
+### Changes made
+
+All in `robots/h2/velocity_env_cfg.py` unless noted. Ported from `unitree_rl_mjlab`'s H2 velocity
+task, which does not exhibit any of the three symptoms.
+
+| | from | to |
+| --- | --- | --- |
+| `ranges.ang_vel_z` / `limit_ranges.ang_vel_z` | ±0.1 / ±0.5 | **±1.0 / ±1.0** |
+| `resampling_time_range`, `rel_standing_envs` | (10,10) s, 0.02 | (3,8) s, 0.05 |
+| `gait_phase`, both obs groups | `{period: 0.8}` | + `command_name`, `command_threshold: 0.1` |
+| `track_ang_vel_z` | weight 0.5, std √0.25 | weight 1.0, std √0.5 |
+| `feet_slide` | `mdp.feet_slide`, −0.2 | `mdp.feet_slide_when_moving`, −0.25 |
+| `feet_clearance` | `foot_clearance_reward`, **+20.0** | `feet_clearance_penalty`, **−1.0** |
+
+New in `locomotion/mdp/`: `gait_phase` gained optional `command_name`/`command_threshold`
+(default `None` = ungated, so H1 is unchanged); `rewards.py` gained `feet_clearance_penalty`
+(mjlab's linear `Σ|z−h|·|v_xy|`, gated) and `feet_slide_when_moving` (a gate wrapping upstream
+`feet_slide` rather than reimplementing it). Pre-existing `foot_clearance_reward` and
+`feet_slide` are untouched, so g1/h1/go2/b2 are unaffected.
+
+Observation width is unchanged (still 5×104), so no ONNX or launch change. Rewards,
+terminations, events and curricula are **not exported to `deploy.yaml` at all** — only the yaw
+range and the new `gait_phase` params cross into deploy.
+
+Deliberately not done, so the retrain stays interpretable: mjlab's `stand_still` and
+`variable_posture` (both deploy-invisible, they are rewards), and its reward economy —
+`is_terminated` −200 in place of an `alive` bonus, orientation penalties moved from root to
+`torso_link`, `bad_orientation` loosened to 70°.
+
+### The deploy-side half: `env->command`
+
+Gating `gait_phase` in Python is only correct if C++ gates identically. A checkpoint trained with
+the gate, run against an ungated clock, marches at zero command anyway — the exact bug the gate
+removes, reintroduced at deploy.
+
+But a C++ observation term is handed only `(env, params)` (`manager_term_cfg.h:16`), and the
+command is produced *inside* whichever `velocity_commands` term is registered — three
+implementations reading three different sources: the stock joystick one
+(`observations.h:111`), `keyboard_velocity_commands` in g1_29dof's `State_RLBase.cpp:11`, and
+`policy_node`'s `/cmd_vel` lambda. None of it lands anywhere `gait_phase` can reach.
+
+As shipped: a `std::vector<float> command` on `ManagerBasedRLEnv`, written by all three
+`velocity_commands` implementations, read by `gait_phase`. This follows the existing idiom —
+`env->global_phase` already exists solely as scratch state for `gait_phase`.
+
+**Backward compatible.** The gate sits behind `params["command_name"].IsDefined()`, and older
+`deploy.yaml`s don't carry that key (2026-09-16 has `params: {period: 0.8}`; 09-11 has no
+`gait_phase` term at all). Both run byte-identically against the new code, and a registered term
+a `deploy.yaml` never names is never called — `_prepare_group_terms` iterates the yaml, not the
+registry.
+
+**Known brittle, see Open items.** The invariant *"every `velocity_commands` implementation must
+also write `env->command`"* is unenforced and invisible at the point where a fourth one would be
+written. Miss it and `env->command` stays `{0,0,0}`, `gait_phase` gates off permanently, and the
+robot stands frozen with no error. Secondary: `gait_phase` reads what `velocity_commands` wrote
+earlier in the same `compute_group` loop, correct only because `deploy.yaml` emits terms in
+config order.
+
+The better shape, designed but **not implemented**: have `ObservationManager` record each term's
+raw output by name — a `name` field on `ObservationTermCfg` (already computed as `term_name` in
+`_prepare_group_terms`), a `last_raw_` map, and a `last(name)` accessor returning a pointer — and
+have `gait_phase` pull from it. That removes the write discipline entirely (any
+`velocity_commands` implementation works, including unwritten ones) and turns the ordering
+dependency into a loud throw instead of a stale read. Costs three call sites in
+`ObservationManager` — `compute_group`, `reset`, and the construction-time call in
+`_prepare_group_terms`, which all invoke `term.func` — and keys by term name alone, which
+collides only if a `deploy.yaml` ever carried two observation groups. Deploy runs the single flat
+group, so that is theoretical but is a real assumption.
+
 ## Open items
 
 1. **Yaw tracking is poor** — ~0.03 rad/s achieved for 0.2 rad/s commanded, versus ~85% for
-   forward walking. The command reaches the observation vector correctly (the `cmd=[...]` field
-   in the diag log confirms this), so this is not a plumbing bug. Most likely a property of this
-   training run: `h2-isaac-training-notes.md` records that H2's Isaac config was copied from G1
-   and is materially less developed than H1's (no `gait_phase` observation, weaker reward
-   weights), and the trained yaw range is only ±0.2 rad/s. **Next step:** check whether it turns
-   this weakly in Isaac Lab too. If so the fix is training-side.
+   forward walking, and unchanged by the 2026-09-16 retrain. Diagnosed training-side (see *H2
+   retrain config*): yaw was only ever sampled at ±0.1 while `deploy.yaml` advertised ±0.5, and
+   `feet_clearance` at weight 20 made turning in place net-negative. Config fixes are written and
+   **untrained**. The command does reach the observation vector correctly — the `cmd=[...]` diag
+   field confirms it — so this was never a plumbing bug.
+   **Cheapest confirmation before spending a retrain:** run `play.py` on the 09-16 checkpoint and
+   watch an env whose command is near zero. Marching there too ⇒ diagnosis holds. Standing in
+   Isaac but marching in Gazebo ⇒ the cause is on the deploy path instead and the above is wrong.
 2. **The PD-rate change is unproven.** Decoupling the PD from the policy rate is verifiably
    running and the wrist-inertia argument is sound, but it did not produce the improvement
    predicted — the gain ordering was the real bug. Don't cite it as proven.
@@ -245,6 +354,17 @@ blocking service requests — subscribing to gz's `/stats` made every `/world/<w
    moot for `unitree_isaac_policy` — it *is* that code. It remains undone for the bridge.
 7. **Diagnostic logging is in `policy_node`**, throttled to once/sec. `cmd=[...]` in particular
    is what distinguishes "command not arriving" from "policy tracks poorly". Keep it.
+8. **`env->command` is a brittle side channel.** Every `velocity_commands` implementation has to
+   remember to write it; one that forgets leaves `gait_phase` gated off forever and the robot
+   standing frozen, with no error. The pull-based replacement is designed in *H2 retrain config*
+   and deliberately not built yet. Until it is, a new `velocity_commands` implementation is a
+   code change with an invisible requirement attached.
+9. **Nothing checks Python↔C++ observation parity.** `export_deploy_cfg` carries a term's *name
+   and params* into `deploy.yaml` and nothing else; the math is hand-written twice. A new term
+   name fails loudly at startup (`Observation term 'X' is not registered`), but a changed
+   implementation — `gait_phase`'s gate is exactly this — diverges silently and costs a training
+   run to discover. The fix is a parity test: record an observation trace from `play.py`, feed
+   the same inputs through the C++ `ObservationManager`, diff the vectors. Does not exist.
 
 ## Method notes for the next agent
 
@@ -285,6 +405,12 @@ for a robot whose `deploy.yaml` uses a term set the stack already supports.
 A new **observation term type** needs code only for the bridge (a branch in
 `observation_term_fn()`); `unitree_isaac_policy` inherits everything upstream registers in
 `observations.h`, `gait_phase` included.
+
+Changing what an **existing** term computes is the dangerous case: `deploy.yaml` carries only the
+term's name and params, so the two implementations have to be kept in agreement by hand and a
+mismatch is silent. `gait_phase`'s command gate is the current example — Python in
+`locomotion/mdp/observations.py`, C++ in `observations.h`, with a comment on each pointing at the
+other. See Open items 8 and 9.
 
 **Before running it, check gain/joint-order parity** (root cause 1) — assert each joint's
 `stiffness`/`damping` against the actuator groups in its training config by name.
