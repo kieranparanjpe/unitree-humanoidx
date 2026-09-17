@@ -286,6 +286,54 @@ Deliberately not done, so the retrain stays interpretable: mjlab's `stand_still`
 `is_terminated` −200 in place of an `alive` bonus, orientation penalties moved from root to
 `torso_link`, `bad_orientation` loosened to 70°.
 
+### Run `yhyw3t6n` collapsed: the survival economy
+
+The first retrain with the changes above (wandb `kieranparanjpe-mcgill-university/isaaclab/yhyw3t6n`,
+log_dir `2026-09-16_15-27-10`) **died at ~iteration 1,200 and ran dead for 14,000 more**:
+
+| | |
+| --- | --- |
+| `Train/mean_episode_length` | exactly 3.00, unchanged for 14k iterations (3 steps = 0.06 s) |
+| `Episode_Termination/base_contact` | 1.0 — every episode; `time_out` 0 |
+| `Train/mean_reward` vs episode length | **−1.32 → +0.026** as length went **9.57 → 3** |
+| `Policy/mean_noise_std` | 0.937 → 0.026; `Loss/learning_rate` floored at 1e-5 from iter 50 |
+
+Reward rising as episodes shorten is the signature: the policy learned that **ending the episode
+immediately beat playing it**. Cause: `foot_clearance_reward` is `20·exp(−…)`, which peaks when
+the feet are still, so at weight 20 it was quietly paying ~+20/step (~+400/episode) for merely
+existing — the only thing making survival worthwhile. Replacing it with a −1.0 penalty was right
+in shape and removed that subsidy, leaving `alive` at +0.003/step against a measured −0.138/step
+cost of exploring. With no penalty for terminating, suicide was optimal and PPO found it.
+
+mjlab's survival economy has three legs; this config had none of them:
+
+| | mjlab | rl_lab H2 as-run |
+| --- | --- | --- |
+| termination penalty | `is_terminated` −200 | none |
+| dense positive for standing | `variable_posture` +1.0/step | none (only `joint_deviation` penalties) |
+| terminations | `time_out`, `bad_orientation` 70° | + `base_contact` (1 N torso), + `base_height`, `bad_orientation` **45.8°** |
+
+Fixes applied:
+
+- `alive` 0.15 → **5.0**. Restores the dense positive at a sane magnitude: +100/episode for
+  surviving against ~+50 for tracking perfectly, where the accidental subsidy was +400 against
+  the same +50. A constant cannot distort *how* the robot moves, unlike the foot-velocity term
+  it replaces.
+- **`is_terminated` −200** added (mjlab's value; dt-scaled that is −4 per event).
+- **`base_contact` removed.** 3 steps is far too fast to have fallen — free-fall from 1.03 m is
+  ~450 ms. The scene's `contact_forces` sensor spans `Robot/.*` with an empty
+  `filter_prim_paths_expr` and the articulation sets `enabled_self_collisions=True`, so
+  `illegal_contact` on `torso_link` fires on **self**-contact; an arm at ~19 rad/s reaches its
+  own torso almost instantly. Ground-only filtering would need a filtered `ContactSensor` plus a
+  termination reading `force_matrix_w` — machinery this repo has nowhere else — so matching
+  mjlab's termination set was the cheaper correct answer.
+- `bad_orientation` 0.8 rad → **70°** (mjlab's). 45.8° ends the episode on a recoverable lean,
+  which is survivable when termination is free but not once it costs −4.
+
+**Convention confirmed empirically from this run:** IsaacLab scales every reward term by
+`step_dt`. `alive` at 0.15 logged `Episode_Reward/alive` = 0.0003 = 0.15 × 0.02 × 2 ÷ 20, which
+also confirms `is_terminated` fires exactly once (2 alive steps + 1 terminating step = length 3).
+
 ### The deploy-side half: `env->command`
 
 Gating `gait_phase` in Python is only correct if C++ gates identically. A checkpoint trained with
@@ -359,7 +407,20 @@ group, so that is theoretical but is a real assumption.
    standing frozen, with no error. The pull-based replacement is designed in *H2 retrain config*
    and deliberately not built yet. Until it is, a new `velocity_commands` implementation is a
    code change with an invisible requirement attached.
-9. **Nothing checks Python↔C++ observation parity.** `export_deploy_cfg` carries a term's *name
+9. **Possible permanent self-contact at H2's default pose.** In `yhyw3t6n`,
+   `Episode_Reward/undesired_contacts` sat at exactly one non-ankle body in contact, from spawn.
+   With `enabled_self_collisions=True` and an unfiltered contact sensor, that is most likely an
+   arm resting on the torso in the default pose — which would mean `undesired_contacts` charges
+   a constant −0.02/step tax the policy can never avoid. **Watch that metric on the next run:**
+   if it stays pinned at exactly one body, the default pose or the collision geometry needs a
+   look. mjlab avoids this class of problem with a dedicated self-collision sensor and a
+   `force_threshold` of 10 N, not 1 N.
+10. **Remaining deviations from mjlab, deliberately not changed** (each is a candidate if the
+   next run still misbehaves): `joint_deviation_*` penalties where mjlab has a `variable_posture`
+   bonus; `reset_robot_joints` velocity range ±1.0 rad/s where mjlab resets to zero; starting
+   `lin_vel_x` at ±0.1 where mjlab's stage 0 is (−0.5, 1.0), so early training is turn-heavy;
+   `base_height_l2` −10 and `dof_pos_limits` −5, neither of which mjlab has at those values.
+11. **Nothing checks Python↔C++ observation parity.** `export_deploy_cfg` carries a term's *name
    and params* into `deploy.yaml` and nothing else; the math is hand-written twice. A new term
    name fails loudly at startup (`Observation term 'X' is not registered`), but a changed
    implementation — `gait_phase`'s gate is exactly this — diverges silently and costs a training
@@ -410,7 +471,7 @@ Changing what an **existing** term computes is the dangerous case: `deploy.yaml`
 term's name and params, so the two implementations have to be kept in agreement by hand and a
 mismatch is silent. `gait_phase`'s command gate is the current example — Python in
 `locomotion/mdp/observations.py`, C++ in `observations.h`, with a comment on each pointing at the
-other. See Open items 8 and 9.
+other. See Open items 8 and 11.
 
 **Before running it, check gain/joint-order parity** (root cause 1) — assert each joint's
 `stiffness`/`damping` against the actuator groups in its training config by name.
