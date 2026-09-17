@@ -334,6 +334,70 @@ Fixes applied:
 `step_dt`. `alive` at 0.15 logged `Episode_Reward/alive` = 0.0003 = 0.15 × 0.02 × 2 ÷ 20, which
 also confirms `is_terminated` fires exactly once (2 alive steps + 1 terminating step = length 3).
 
+### Run `3c6nxbca`: trains cleanly, leans back, will not translate
+
+Second retrain (`humanoidx-isaaclab/3c6nxbca`). Training is **healthy** — full 1000-step episodes,
+99.7% `time_out`, `lin_vel_cmd_levels` maxed, reward 112 — so the survival fix worked. But in
+Gazebo it leans back, turns well, and cannot walk forward, backward or strafe.
+
+**The lean is in the network, not the simulator.** Feeding 09-16 and 09-17 identical synthetic
+observations through onnxruntime, mean hip_pitch deviation from default under command:
+
+| | fwd 0.5 | fwd 1.0 | yaw 0.5 |
+| --- | --- | --- | --- |
+| 09-16 (walks in gz) | −0.017, +0.052 | −0.028, +0.059 | −0.023, +0.028 |
+| 09-17 | **+0.059, +0.137** | **+0.102, +0.183** | −0.018, +0.105 |
+
+Default hip_pitch is −0.25 rad, so positive extends the hip and pitches the torso back. 09-17
+holds both hips extended under a forward command, scaling with its magnitude, and barely at all
+under yaw. Ankle-pitch swing is smaller (0.23/0.30 vs 0.33/0.47 — less push-off), knee swing
+larger (0.72 vs 0.62). Full-amplitude stepping, weight back, no propulsion.
+
+Cause: **`alive` at 5.0 was 66% of the entire positive reward budget.**
+
+| positive (raw/episode) | | negative | |
+| --- | --- | --- | --- |
+| **alive** | **+100** | action_rate | −11.4 |
+| gait | +18.5 | joint_deviation_waists | −9.6 |
+| track_lin_vel_xy | +17.0 | dof_pos_limits | −4.8 |
+| track_ang_vel_z | +15.4 | rest | −12 |
+
+Any change raising fall probability cost 100 × Δp, so the policy took the safest gait that still
+collected `gait` (+18.5, paid for stepping in rhythm whether or not the robot moves) and most of
+`track_lin_vel_xy` — whose `exp` form is already at 0.85 of max with a 0.2 m/s error, making the
+remainder not worth the risk. `feet_clearance` was checked and is **not** implicated: −0.3.
+
+5.0 was sized from a −0.138/step exploration cost measured in `yhyw3t6n` — the *collapsed* run,
+where the robot was flailing — so it was ~10× too high for a healthy one. It was also
+belt-and-braces: `is_terminated` is what makes termination unattractive, and mjlab carries **no
+alive term at all**. Now **1.0**, putting tracking at ~46% of positives instead of 21%.
+
+**Method note — run it, don't infer it.** The diagnosis above was first argued from a *static*
+ONNX probe (one forward pass, history filled with identical frames, `last_action`=0,
+`projected_gravity`=[0,0,−1]) and over-claimed: a hip extension under a forward command from a
+standing pose is also just the first frame of a normal stride, and a single point in state space
+cannot tell the two apart. The policy does in fact walk. **An agent working on this can and
+should launch the stack itself** — headless Gazebo, `setsid` the launch, publish `/cmd_vel`, and
+measure — rather than reasoning from weights:
+
+```bash
+source /opt/ros/jazzy/setup.bash && source ~/humanoidx/jazzy_ws/install/setup.bash
+ros2 launch unitree_isaac_policy all.launch.py \
+  policy_onnx_path:=<run>/exported/policy.onnx \
+  urdf_path:=~/humanoidx/unitree-humanoidx/unitree_ros/robots/h2_description/H2.urdf
+ros2 topic pub -r 20 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.5}}"
+ros2 topic echo /joint_states      # or /odom, /imu, policy_node's throttled diag line
+```
+
+Read *Method notes for the next agent* below first — kill stale `policy_node`/`gz sim`
+processes, keep the publish and the sampling in one call, and use `setsid` + `kill -- -$PGID`.
+
+The static ONNX probe is still worth keeping for questions it can actually answer — "does the
+gate change the output at all", "do these two checkpoints differ on identical input". `pip
+install onnxruntime` into the scratchpad; the layout is term-major, each term's 5-frame history
+flattened then terms concatenated in `deploy.yaml` order (3+3+3+31+31+31+2 = 104, ×5 = 520 in,
+31 out). Just don't mistake it for a rollout.
+
 ### The deploy-side half: `env->command`
 
 Gating `gait_phase` in Python is only correct if C++ gates identically. A checkpoint trained with
