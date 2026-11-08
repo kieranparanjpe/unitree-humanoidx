@@ -194,9 +194,15 @@ them exist here. The equivalent of Classic's `set_model_configuration` is a dire
   (`WorldControlState` → `Boolean`) writes arbitrary components.
 - Joints: `JointPositionReset` / `JointVelocityReset`, payload = serialized `gz.msgs.Double_V`.
   Confirmed against `VectorDoubleSerializer` in gz-sim's `components/Serialization.hh`.
-- Base: `/world/<w>/set_pose` for pose, `WorldLinearVelocityCmd` / `WorldAngularVelocityCmd` for
-  velocity. These have no explicit serializer, so their payload is the **ASCII** form of a
-  `math::Vector3d` (`b"0 0 0"`), not protobuf. One-shot, not a pin — verified.
+- Base: `/world/<w>/set_pose` for pose, model-frame `LinearVelocityCmd` / `AngularVelocityCmd`
+  (zero) for velocity, removed again in the joint-reset request. These have no explicit
+  serializer, so their payload is the **ASCII** form of a `math::Vector3d` (`b"0 0 0"`), not
+  protobuf. **Corrected 2026-11-05:** this used to write `WorldLinearVelocityCmd` /
+  `WorldAngularVelocityCmd`, which gz-sim 8's Physics never reads — the base kept its momentum
+  through every reset (a robot reset mid-fall slid ~1.4 m). The model-frame commands are zeroed
+  but *not removed* by Physics after each step, so left in place they pin the base at zero
+  velocity; and `EntityComponentManager::SetState` skips a component with an empty payload
+  *before* checking `remove`, so the removal needs a (dummy) payload too.
 - Component type ids are `gz::common::hash64(type_name)`, i.e. FNV-1a/64. C++ callers use
   `components::JointPositionReset::typeId` instead. `verify_type_ids()` re-derives it in Python
   and checks it against `Name`/`Pose`/`ParentEntity` at startup. **Note this check is weaker
@@ -452,16 +458,22 @@ group, so that is theoretical but is a real assumption.
 2. **The PD-rate change is unproven.** Decoupling the PD from the policy rate is verifiably
    running and the wrist-inertia argument is sound, but it did not produce the improvement
    predicted — the gain ordering was the real bug. Don't cite it as proven.
+   **Measured 2026-11-06: even at 1 kHz the wrist roll joints are unstable.** While standing
+   quietly both oscillate at ~200 Hz, saturated at the URDF's 18.7 rad/s velocity limit
+   (15.5 rad/s rms, 31 N·m rms); shoulder and wrist yaw shake along with them. See
+   `EVAL_HANDOFF.md` open issues.
 3. **Walking and turning have not been re-measured** since the reset fix, the `Phase` rework, or
    the move to `unitree_isaac_policy`. The numbers in Status are inherited from an earlier
    session. Standing is confirmed; distance-over-time is not.
 4. **`unitree_policy_bridge` has not been re-tested** against any of this session's changes, and
    its reset handling differs from `policy_node`'s. If it is staying, it needs a pass; if it is
    going, delete it.
-5. **`pd_node` does not clear its target on reset**, where `policy_bridge_node` does. During the
-   re-seed window it keeps driving toward the pre-teleport target. Harmless at current rates —
-   the window is 1–2 ms and the world is paused across the teleport — but mitigated by timing
-   rather than by design.
+5. **Fixed 2026-11-06: `pd_node` now drops its pre-reset target on reset.** It was not harmless:
+   after a fall the stale target put 114–284 N·m on the hip/waist yaw joints for the first
+   post-reset step (measured). `pd_node` now switches to `default_joint_pos` on `/policy_reset`
+   and publishes a fresh effort immediately; `gz_reset_node` publishes `/policy_reset` before
+   un-pausing and waits for acknowledgement. After the fix: 25–68 N·m. Details in
+   `EVAL_HANDOFF.md`.
 6. **Observation parity against the C++ deploy reference** (plan doc `## 9`, last item) is now
    moot for `unitree_isaac_policy` — it *is* that code. It remains undone for the bridge.
 7. **Diagnostic logging is in `policy_node`**, throttled to once/sec. `cmd=[...]` in particular
