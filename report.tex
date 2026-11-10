@@ -1,0 +1,241 @@
+\documentclass[11pt]{article}
+
+% --- Encoding and language ---
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+
+% --- Page layout / margins ---
+\usepackage[a4paper,margin=0.5in]{geometry}
+
+% --- Math support ---
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+
+\usepackage{enumitem}
+
+% --- Graphics / images ---
+\usepackage{graphicx}
+\graphicspath{{images/}}
+\usepackage{float}
+
+% --- Figures and captions (optional but common) ---
+\usepackage{caption}
+\usepackage{subcaption}
+
+% --- Better tables (optional) ---
+\usepackage{booktabs}
+
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{placeins}
+\usepackage{url}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny,
+    showstringspaces=false
+}
+
+\definecolor{mdBg}{HTML}{F2F2F2}
+\definecolor{mdText}{HTML}{C7254E}
+% Fix: Properly define the macro to accept 1 argument [#1]
+\newcommand{\code}[1]{%
+    \colorbox{mdBg}{\textcolor{mdText}{\texttt{#1}}}%
+}
+% --- Hyperlinks (load last) ---
+\usepackage[colorlinks=true,linkcolor=blue,urlcolor=blue,citecolor=blue]{hyperref}
+
+
+
+\title{Locomotion Policies for the Unitree H2: Comp 400}
+\author{Kieran Paranjpe}
+\date{November 2026}
+
+\begin{document}
+
+\maketitle
+
+\section{Abstract}
+Locomotion policies are fundamental to the success of a humanoid robot; a humanoid must be able to walk. In this report, I compare various different training methods, including different reward functions, domain randomization, and curriculums to find a suitable locomotion policy. I use IsaacLab for training, then evaluate policy performance in Gazebo with ROS2, demonstrating performance with Sim2Sim. The --- policy performs the best after transfer. We find that --- and --- were highly influential to the success of the policy.
+
+\section{Introduction}
+The aim of this project is to train a policy $\pi_\theta(a|s)$ for the Unitree H2 that can walk forwards, backwards, strafe, and turn on flat ground. We validate performance using Sim2Sim transfer into Gazebo.
+
+This report does not introduce any new methods, and is mostly a summary of an engineered policy. As such, I will discuss implementation details with more depth, including a description of the training and deployment workflow. This is for the benefit of readers who want to train similar policies on the H2. This report will describe the following:
+\begin{enumerate}
+    \item training and deployment workflow
+    \item training setup
+    \item evaluation methods
+    \item results
+\end{enumerate}
+Throughout this report, I will use the term \textit{training setup} to refer to the combination of rewards, commands, events, curriculums, observations, actions, algorithm, and policy and critic network parameters that influence training. Much of the training setup was copied or adapted from the provided setup applied to the Unitree G1 and H1 examples provided by Unitree for IsaacLab, as well as examples provided for the Unitree H2 for MjLab. All policies were trained using PPO. Details on the algorithm and network parameters can be found in the appendix.
+
+\section{Training and Deployment Workflow}
+Unitree provides a repository for training their robots with IsaacLab called \code{unitree\_rl\_lab} that includes out of the box support for the H1 and G1 but not the H2. However, they support importing USD files, so we can use the supplied USD file for the Unitree H2 located in the \code{unitree\_model} repository. I also needed to add a configuration for it in \code{unitree\_rl\_lab}. After completing this, I was able to write task configurations and train policies for the H2.
+
+Deployment into Gazebo is a more complex process. As it stands, Unitree has a ROS2 repository, but no out of the box support for Gazebo. Additionally, their ROS2 repository is intended for low level DDS communication with a real robot, not for Sim2Sim transfer. As such, I had to write the following ROS2 packages:
+\begin{enumerate}
+    \item \code{unitree\_gz\_bringup}: Launches Gazebo with a robot spawned. Includes a node for resetting the robot.
+    \item \code{unitree\_gz\_description}: Converts a URDF from unitree and a \code{deploy.yaml} from policy training into a ROS2-ready URDF.
+    \item \code{unitree\_isaac\_policy}: Responsible for 2 nodes: \code{policy\_node} and \code{pd\_node}. They perform inference on the policy, as well as convert the joint position action vector into torques for the robot.
+    \item \code{unitree\_gz\_eval}: Used for evaluating the policies.
+\end{enumerate}
+When performing inference in \code{policy\_node}, I reuse as much of the deployment C++ code as I can from the deploy section in \code{unitree\_rl\_lab}. This means that the observation vector, representation of the environment, action vector and ONNX runtime are reused to limit drift between the Sim2Sim pipeline and any other deployment pipelines.
+
+\section{Methods (Training Setup)}
+
+As mentioned in the introduction, all policies were trained in IsaacLab with PPO on a flat terrain. Each policy is trained for 20,000 iterations with 4096 parallel environments.
+
+I construct a baseline training setup, detailed below, followed by modifications to the baseline to look for improvements.
+
+\subsection{Baseline Training Setup}
+The baseline training setup can be broken up into the following parts:
+\subsubsection*{Commands}
+The command is given as input to the policy and critic in addition to the observation. We define it as the 3 tuple $c = (v_x, v_y, \omega_z)$ representing the linear velocity in the $x,y$ directions (in the robot's frame), alongside the angular velocity around the vertical axis (or yaw velocity). We resample a command every $s$ seconds, where $s$ is uniformly sampled on the interval $(1.0, 8.0)$. We sample a command as follows:
+\begin{itemize}
+    \item With probability $p=0.05$, the command is zeroed to give a standing command.
+    \item With probability $p=0.475$, we give a direct command. This means that we uniformly sample $v_x \in (v_x^{min}, v_x^{max})$, $v_y \in (-v_y^{max}, v_y^{max})$ and $\omega_z \in (-\omega_z^{max}, \omega_z^{max})$.
+        \item With probability $p=0.475$, we give a heading command. Similarly, we uniformly sample $v_x \in (v_x^{min}, v_x^{max})$, $v_y \in (-v_y^{max}, v_y^{max})$. For rotation, each policy step we recompute $\omega_z = \text{clip}(\frac{\text{wrap}(\psi^* - \psi)}{2}, -\omega_z^{max}, \omega_z^{max})$ where wrap means we map the angle into the range $(-\pi, \pi)$, $\psi$ is the current heading (yaw) of the pelvis, and $\psi^*$ is uniformly sampled from $(-\pi, \pi)$. The idea here is to train the robot to walk and face a direction at the same time.
+\end{itemize}
+In all cases, if $\|c\| \leq 0.1$ then we set $c = (0, 0, 0)$. We grow the sampling bounds according to a curriculum, detailed in a later section.
+\subsubsection*{Observation}
+The observation vector that we pass into the policy is a concatenation of the following terms:
+\begin{itemize}
+    \item Base angular velocity: the pelvis rotation rate $\omega = (\omega_x, \omega_y, \omega_z)$ in radians per second. $k=0.2$, $n=0.2$.
+    \item Projected gravity: the unit vector representing gravity at the pelvis, in the pelvis frame $g=(g_x, g_y, g_z)$ where $g=(0, 0, -1)$ when standing perfectly upright. $k=1$, $n=0.05$.
+    \item Velocity command: $(v_x, v_y,\omega_z)$ from the previous section. No noise and no scaling.
+    \item Relative joint position: $q_j-q_j^0$ for all 31 joints where $q_j^0$ is the default joint position. $k=1$, $n=0.01$.
+    \item Joint velocity: $\dot{q}_j$ for all 31 joints. $k=0.05$, $n=1.5$.
+    \item Last action: the previous action outputted by the policy. No noise or scaling.
+    \item Base linear velocity (Critic Only): the linear velocity of the pelvis $v=(v_x, v_y,v_z)$.
+\end{itemize}
+For each term $s_i$, the output we actually send to the policy is given by $o_i = k_i (s_i + u_i), \ u_i \sim \mathcal{U}(-n_i, n_i)$, where $k$ is the scale of the observation term and $u_i$ is uniformly sampled sensor noise. We add a scale because we do not normalise the observation vector, so we need the relative scale of each term to be similar. Additionally, the critic does not receive terms with any noise. Finally we feed a sequence of the 5 most recent observations into both the policy and critic. As such, one observation has size $102$ for the policy, and $105$ for the critic, so the entire observation vector with history has $510$ and $525$ terms respectively.
+\subsubsection*{Action}
+The policy network outputs a vector $f(o) \in \mathbb{R}^{31}$ representing joint positions. In training, we treat this vector as 31 means that parameterise 31 gaussian distributions, and we sample the action as $a_i \sim \mathcal{N}(f(o)_i, \sigma_i^2)$, where $\sigma \in \mathbb{R}^{31}$ is a learnable parameter trained with the same loss as the rest of the network. At deploy time, we don't use the distribution and instead $a=f(o)$ directly. Finally, we shift and scale the action: $a_{scaled}=\frac{1}{4}a + q^0$.
+
+To convert scaled joint positions into joint torques, we use a PD controller: $\tau = K_p \cdot (a_{scaled} - q) - K_d \cdot \dot q$, clamped to a torque limit. Limits for torque and PD gains are per joint in the robot configuration.
+
+\subsubsection*{Domain Randomization}
+\begin{enumerate}
+    \item Friction: once per environment on startup we set the dynamic and static friction of each body to values sampled independently and uniformly in the range $(0.3, 1.0)$. We add this because in the real world we can't precisely control for friction.
+    \item Mass: once per environment on startup we add a value uniformly sampled from $(-1.0, 3.0)$ to the torso. This randomization is meant to simulate carrying a load. This is not a good domain randomisation to account for carrying a load with the humanoid's hands.
+    \item Initial Pose: each time the environment resets we randomise the initial pose of the root (pelvis). We uniformly sample position $x,y \in (-0.5, 0.5)$ and yaw $\in (-\pi, \pi)$.
+    \item Push: every $s \sim \mathcal{U}(5, 6)$ seconds, we add a random velocity to the root joint, uniformly sampled from the intervals as follows: $x,y\in (-0.5, 0.5)$ and $z\in (-0.4, 0.4)$ m/s, roll, pitch $\in (-\pi/6, \pi/6)$ and yaw $\in (-\pi/4, \pi/4)$ rad/s.
+\end{enumerate}
+\subsubsection*{Curriculum}
+Both the linear and angular velocity command limits are controlled by a curriculum. Every 1000 policy steps (20 seconds), we compute the quantity $\bar r = \frac{\frac{1}{|R|}\sum wr\Delta t}{20}$ where $R$ is the set of all robots resetting on that step and $wr$ is the weighted reward term (see Rewards), always computed with $\sigma_{lin}=\sigma_{ang}=0.5$: \code{track\_lin\_vel\_xy} for $v_x^{min}$, $v_x^{max}$, $v_y^{max}$, and \code{track\_ang\_vel\_z} for $\omega_z^{max}$. The two are scored separately, so the linear and yaw limits grow independently. This quantity represents the average reward per second for that term over the resetting robots' last episodes, counting the time after a fall as earning zero. If $\bar r > 0.8w$, where $w$ is that term's weight ($1$ for \code{track\_lin\_vel\_xy} and $0.5$ for \code{track\_ang\_vel\_z}), then for all robots we widen the matching limits by $0.1$, clipped to maximum values. The values grow as follows:
+\begin{itemize}
+    \item $v_x^{min} = -0.1 \rightarrow -0.5$
+    \item $v_x^{max} = 0.1 \rightarrow 1$
+    \item $v_y^{max} = 0.1 \rightarrow 0.5$
+    \item $\omega_z^{max}= 0.1 \rightarrow 1$
+\end{itemize}
+The idea is to increase the velocity commands when the robot is able to track the linear and yaw velocities sufficiently well.
+\subsubsection*{Rewards}
+The reward is a weighted sum of the following terms:
+\begin{enumerate}
+    \item \code{track\_lin\_vel\_xy}, $w=1$: $r=\text{exp}(-\frac{(c_x - \tilde v_x)^2+(c_y - \tilde v_y)^2}{\sigma_{lin}^2})$ with $\sigma_{lin}=0.5$, where $c$ is the commanded velocity and $\tilde v$ is the linear velocity of the pelvis, in a frame with 0 pitch and roll, but with the robot's heading. This term is the primary driving factor that makes the robot follow the command in terms of linear motion.
+    \item \code{track\_ang\_vel\_z}, $w=0.5$: $r=\text{exp}(-\frac{(c_z - \omega_z)^2}{\sigma_{ang}^2})$ with $\sigma_{ang}=0.5$, where $c_z$ is the commanded yaw rate and $\omega_z$ is the yaw rate of the pelvis in the pelvis frame. We use $w=0.5$ so that each commanded term gets a weight of $0.5$. Similarly to the previous term, this term is the primary factor that makes the robot follow the command in terms of rotation.
+    \item \code{alive}, $w=1$: $r=1$ on every step where the episode has not ended.
+    \item \code{is\_terminated}, $w=-200$: $r=1$ on the step where the episode ends by a fall (pelvis below 0.2\,m or tilted more than $70^\circ$), and 0 otherwise. Time-outs do not count.
+    \item \code{base\_linear\_velocity}, $w=-2$: $r=v_z^2$, where $v_z$ is the vertical velocity of the pelvis in the pelvis frame. This is to penalize bobbing.
+    \item \code{base\_angular\_velocity}, $w=-0.5$: $r=\omega_x^2+\omega_y^2$, where $\omega_x, \omega_y$ are the roll and pitch rates of the pelvis in the pelvis frame. This is to penalize any leaning or swaying.
+    \item \code{flat\_orientation\_l2}, $w=-5$: $r=g_x^2+g_y^2$, where $g$ is the unit gravity vector expressed in the pelvis frame, so $r=0$ when the pelvis is level. Similarly, this is to penalize leaning and swaying.
+    \item \code{base\_height}, $w=-10$: $r=(z-1.0)^2$, where $z$ is the height of the pelvis above the ground in metres. This term is to penalize anything other than a standing height.
+    \item \code{joint\_vel}, $w=-0.001$: $r=\sum_j \dot q_j^2$, summed over all 31 joints. This term penalizes the joints from moving too quickly. We want the robot to move with as little speed as is required to complete the task.
+    \item \code{joint\_acc}, $w=-2.5\times10^{-7}$: $r=\sum_j \ddot q_j^2$, summed over all 31 joints. Similar to the previous term, we want smooth and efficient motion.
+    \item \code{action\_rate}, $w=-0.05$: $r=\sum_j (a_{t,j}-a_{t-1,j})^2$, where $a_t$ is the policy's action at step $t$. This term also penalizes high rates of motion.
+    \item \code{dof\_pos\_limits}, $w=-5$: $r=\sum_j \left(\max(0,\ q_j^{min}-q_j)+\max(0,\ q_j-q_j^{max})\right)$, where $[q_j^{min}, q_j^{max}]$ is the middle 90\% of joint $j$'s range.
+    \item \code{energy}, $w=-2\times10^{-5}$: $r=\sum_j |\dot q_j|\,|\tau_j|$, where $\tau_j$ is the torque applied at joint $j$.
+    \item \code{joint\_deviation\_arms}, $w=-0.1$: $r=\sum_{j\in\text{arms}} |q_j-q_j^{0}|$, where $q^0$ is the default pose and the arms are the shoulder pitch, roll and yaw, elbow, and wrist joints.
+    \item \code{joint\_deviation\_waist}, $w=-1$: $r=\sum_{j\in\text{waist}} |q_j-q_j^{0}|$, over the waist yaw, roll and pitch joints.
+    \item \code{joint\_deviation\_hips}, $w=-1$: $r=\sum_{j\in\text{hips}} |q_j-q_j^{0}|$, over the hip roll and hip yaw joints.
+    \item \code{joint\_deviation\_head}, $w=-0.1$: $r=\sum_{j\in\text{head}} |q_j-q_j^{0}|$, over the head pitch and yaw joints.
+    \item \code{feet\_slide}, $w=-0.25$: $r=\mathbb{I}[\|c\|>0.1]\sum_{f} \mathbb{I}[\text{$f$ in contact}]\,\|v^f_{xy}\|$, where $v^f_{xy}$ is the horizontal world-frame velocity of foot $f$, and a foot is in contact when its contact force exceeds 1\,N.
+    \item \code{feet\_clearance}, $w=-1$: $r=\mathbb{I}[\|c\|>0.1]\sum_{f} |z^f-0.1|\,\|v^f_{xy}\|$, where $z^f$ is the height of foot $f$, so moving feet are penalized for being away from a 0.1\,m swing height and still feet cost nothing.
+    \item \code{feet\_contact\_forces}, $w=-0.0002$: $r=\sum_{f} \max(0,\ \|F^f\|-500)$, where $F^f$ is the contact force on foot $f$ in newtons.
+    \item \code{undesired\_contacts}, $w=-1$: $r=\sum_{b} \mathbb{I}[\|F^b\|>1]$, the number of bodies other than the feet (ankle links) with a contact force above 1\,N.
+\end{enumerate}
+
+\subsection {Additions to the baseline}
+After training the baseline, I consider making changes, including different randomisations, commands, rewards and curriculums.
+\subsubsection{Gait Reward}
+I add a new reward term, \code{gait} with $w=0.5$.
+\[
+r=\mathbb{I}[\|c\| > 0.1] \cdot [\mathbb{I}(\phi_L < 0.55 = \text{Left foot on ground}) + \mathbb{I}(\phi_R < 0.55 = \text{Right foot on ground})]
+\]
+Where $\phi_L,\phi_R$ are the gait clocks. We compute it as $\phi_L = \phi$, $\phi_R = (\phi + 0.5) \text{ mod } 1$, and $\phi = \frac {t \text{ mod } 0.8}{0.8}$, where $t$ is the time since the episode began. 0.8 represents a period of 0.8 seconds.
+\subsubsection{Gait Reward and Observation}
+I add the same reward term \code{gait} as in the last section, but I also add $\sin(2\pi\phi)$ and $\cos(2\pi\phi)$, set to 0 when $\|c\| \leq 0.1$, to the observation of both policy and critic.
+\subsubsection{Gait Reward and Observation with Resetting clock}\label{sec:resetting-clock}
+We add the same reward as before, however we compute $\phi$ differently. Previously, $\phi$ depended on $t$ directly, and as such the gait phase was dependent on the time since the episode began, not the time since the robot was commanded to begin walking. The robot can still learn which point in the walking gait each value of $\phi$ corresponds to, but when it is told to start walking, the clock can be at any point in its cycle, so it has to learn to start walking from every point in the gait, which is harder. As such, for this experiment we compute $\phi = \frac {(t-t^*) \text{ mod } 0.8}{0.8}$ where $t$ is the time since the episode began, and $t^*$ is the last time $\|c\|$ went from 0 to non-zero, or $t^*=0$ (the start of the episode) if that has not happened yet.
+\subsubsection{Pose penalty}
+In the baseline, we encourage the arms, waist, hips, and head to move less by penalizing any deviation from their default pose. The problem is that we don't take motion into account. We would expect more motion in these joints when walking faster than when walking slower or when standing. For example, we want to allow the arms to sway when walking. As such, we replace the \code{joint\_deviation\_*} terms with a new reward term, \code{pose} with $w=-1$:
+\[
+r=1-\exp (\frac{-1}{31} \sum_{j=1}^{31}(\frac{q_j-q_j^0}{\sigma_j})^2)
+\]
+where $\sigma_j$ is the amount of deviation we accept per joint. We define $\sigma_j = f(\sqrt{c_x^2 + c_y^2} + |c_z|)$, a function of the commanded "speed", based on a configuration table. The idea is to allow for larger values of $\sigma$ when the speed is greater. Additionally, while moving the hip pitch and knee joints have the largest deviations allowed ($0.5$ rad), and the waist roll and pitch, ankle roll, shoulder roll and yaw, elbows, and wrists the smallest ($0.1$ rad).
+\subsubsection{Tracking $\sigma$ curriculum}
+In the baseline, the tracking reward terms, \code{track\_lin\_vel\_xy} and \code{track\_ang\_vel\_z}, use $\sigma_{lin}$ and $\sigma_{ang}$, both at a fixed value of $0.5$. The problem with one fixed value is that once the robot learns to walk reasonably well, it stops improving. For example, an error of $0.1$ would give reward $e^{-0.1^2 / 0.5^2}=0.96$ out of a possible reward of $1$. As such, nothing really pushes it to be more precise. In this experiment, I add a new curriculum that decreases $\sigma_{lin}$ and $\sigma_{ang}$ from $0.5 \rightarrow 0.05$ in intervals of $0.05$, each independently. I change them on the same schedule as the other curriculum terms for the command sampling limits: $\sigma_{lin}$ decreases when \code{track\_lin\_vel\_xy} has $\bar r > 0.8w$, and $\sigma_{ang}$ when \code{track\_ang\_vel\_z} does, where here $\bar r$ uses the current $\sigma_{lin}$ or $\sigma_{ang}$ instead of $0.5$. Neither ever increases.
+
+Since a smaller $\sigma_{lin}$ or $\sigma_{ang}$ lowers the tracking reward, the command limit curriculum would stop widening the limits if it used the current value. This is why it always computes $\bar r$ with $\sigma_{lin}=\sigma_{ang}=0.5$, which in the baseline is the same as the reward itself.
+\subsubsection{Additional domain randomisations}
+We add the following new domain randomisations:
+\begin{enumerate}
+    \item Initial Velocity: each time the environment resets we randomise the initial velocity of each joint. We uniformly sample a joint velocity $\dot q \in (-0.1, 0.1)$.
+    \item Initial Pose: in addition to the random starting position of the pelvis, we randomise the starting position of each joint, $q^{init}$, by adding to $q^0$ a uniformly sampled value $s_i \in (-0.1, 0.1)$, clamped to the middle 90\% of each joint's range.
+    \item Action delay: each policy step we uniformly select a delay $d \in [0, 3]$ to hold the latest action from reaching the PD controller in IsaacLab. The policy runs at 50hz, so every 20ms. In IsaacLab, the PD controller runs at 200hz, so every 5ms. Without a delay, that means that when the policy outputs an action, $a_t$, it sends that same action to the PD controller 4 times, sustaining it for the full 20ms until the next policy step. With a delay, when the policy runs and outputs $a_t$, we still send $a_{t-1}$ to the PD controller for $d$ steps, so the latest action can arrive late. Crucially, in IsaacLab the timing is all based on one synchronised simulation clock. That means that if the policy can't actually run at 50hz, the whole simulation waits for it and simulation time runs out of sync with real time.
+
+    In Gazebo with ROS2, and in real life, the policy node, PD node, and physics all run asynchronously (the real robot has no PD node; its motor drivers run the PD controller). In real life, there is no simulation time, everything is in real time. This means that the policy node could very easily slow down and take multiple milliseconds to run. As such, the action it sends to the PD controller could be slightly outdated. This randomisation aims to add robustness to this problem.
+    \item Mass scaling: once per environment on startup we multiply the mass of each link, excluding the torso, by a scale factor uniformly sampled from $(0.9, 1.1)$.
+    \item Centre of Mass: once per environment on startup we add a uniformly sampled value $(x,y,z)$ to the centre of mass of the torso, where each $x,y,z \in (-0.05, 0.05)$. We choose the torso because it's the heaviest link.
+\end{enumerate}
+\subsubsection{Animated target}
+When a robot starts to learn in simulation it has no idea what walking should look like. It's encouraged by the reward to learn walking, but few terms actually enforce that it learns to walk like a human would. The foot reward terms kind of push it towards walking by rewarding the feet for moving when not in contact with the ground, gait phase rewards a step-like behaviour, and the pose penalty / joint deviation terms try to keep the robot close to its default pose, but we never show the robot what walking looks like. While it might be true that walking is the only feasible solution that maximises the rewards presented thus far, it seems counterintuitive to not show the robot how it should walk.
+
+As a prerequisite, I use 4 stationary animations for the Unitree H2: walking straight, walking diagonally, strafing, and turning. The first frame of each animation is a standing idle pose, which can be viewed as a 5th animation.
+
+Each animation has a period $p$. The walking animations travel some distance $d$ per period with direction $\theta$. The turning animation turns by an angle $\theta$ each period.
+
+We select the animation to use at any given time based on the command $c = (c_x, c_y,c_z)$. When $\|c\| = 0$ we use the first-frame idle animation. When ...
+
+I use the following reward terms (independently) to try to show the robot what walking looks like. These are a substitution for the joint deviation terms (and also take the same role as the pose penalty) and gait phase terms.
+\begin{enumerate}
+    \item Time Keyed Animation: each keyframe of the animation is tied to a specific time. For this, we compute the gait clock as in Section~\ref{sec:resetting-clock}, $\phi =\frac {(t-t^*) \text{ mod } s}{s}$, and pass it to the observation vector. Notice that for this section we use a variable period $s$. The animation walks itself has period of $p$ seconds, and travels $d$ meters each period. Then $p=\frac{d}{\|c_{linear}\|}$. The reward term is then given by:
+    \[
+        r=\exp (\frac{-1}{31} \sum_{j=1}^{31}(\frac{q_j-A_j^t}{\sigma_j})^2)
+    \]
+    where $A_j^t$ is the position of joint $j$ at time $t$ in the target animation. Similarly to the pose reward term, we use $\sigma_j$ proportionate to the speed of the command. However, these deviation tolerances are quite a bit lower than in the pose reward term.
+    \item Nearest Neighbour: instead of indexing one target animation by time since we started moving, we treat the set of keyframes in the animation as the set of desired poses for the robot. The reward term is given by
+    \[
+        r=\exp (\frac{-1}{31} \sum_{j=1}^{31}(\frac{q_j-A_j^{nearest}}{\sigma_j})^2)
+    \]
+    Where $A^{nearest}$ is the keyframe in any of the input animations that minimises $|q-A|$. The advantage here is that we don't need to consider the timing of the animation.
+\end{enumerate}
+
+\section{Evaluation}
+After deploying the policy to Gazebo, we run a consistent set of tests on each policy to evaluate its goodness. A test consists of a series of commands sent to the robot. During each test we track a number of metrics in comparison to what we expect perfect motion to look like. We run each policy on the following tests:
+\begin{enumerate}
+    \item Stand: $c=(0,0,0)$ for 4 seconds.
+    \item Forward Backward: the robot is commanded to walk forward for 4 seconds, stand for 1 second, then walk backwards.
+    \item Speed Ladder: the robot walks forwards for 3 seconds at each speed, beginning at 0.25, and increasing by 0.25 until a speed of 1.
+    \item Strafe: the robot walks right for 4 seconds, stands for 1 second, then walks left for 4 seconds.
+    \item Spin: the robot turns left on the spot for 4 seconds, stands for 1 second, then turns right for 4 seconds.
+    \item Diagonals: the robot does 3 diagonal walks for 4 seconds, each separated by 1 second of standing.
+    \item Walking turns: the robot walks and turns at the same time (at least one linear term and the yaw term of $c$ are non-zero).
+    \item Start Stop: the robot walks forwards for 2 seconds, then stops for 1 second, and repeats until it has walked 4 times.
+    \item Reversals: the robot walks forwards then immediately backwards with no stop in between, then does the same walking left then right.
+    \item Half Square: the robot walks forwards, then turns 90 degrees on the spot, and repeats once.
+    \item Mixed Drive: a combination of walking and turning.
+    \item Pushes: the robot walks forwards for 10 seconds while getting a push every 2 seconds. Then the robot stands for 8 seconds while receiving another push every 2 seconds.
+\end{enumerate}
+We run each test 3 times as there can be variance between runs. The simulator is deterministic, but timing asynchronisms can cause different behaviour between runs.
+\section{Results}
+tables time
+\end{document}
+

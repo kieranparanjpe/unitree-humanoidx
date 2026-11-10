@@ -28,27 +28,37 @@ The baseline needs no new functions; every term below already exists in Isaac La
 | Turn cz | [-0.1, 0.1] → [-1.0, 1.0] |
 | Heading mode | 50% of robots (`rel_heading_envs = 0.5`). In heading mode cz = clip(0.5 × wrap(target heading - heading), current turn range), so the turn curriculum also limits steering |
 | Standing | 5% of robots, c = 0 (`rel_standing_envs = 0.05`) |
-| Zero-snap | kept: a drawn command with size sqrt(cx² + cy² + cz²) ≤ 0.1 is set to 0, and the robot stands until its next draw |
+| Zero-snap | kept, and checked every step: whenever the command's size sqrt(cx² + cy² + cz²) is ≤ 0.1 it is set to 0 |
 
 Each axis is drawn uniformly and independently; no axis is ever exactly 0 except through the
 zero-snap (which zeroes all three).
 
-A snapped robot is put in standing mode (since 2026-11-07, in `UniformLevelVelocityCommand`,
-`mdp/commands/velocity_command.py`). Before that, heading mode rewrote cz on the next step, so a
-snapped heading-mode robot was told to turn in place instead of stand. 09-17-v2 was trained that
-way, and unitree_rl_mjlab still works that way.
+Since 2026-11-09 the snap runs every step, after heading mode has set that step's cz
+(`UniformLevelVelocityCommand`, `mdp/commands/velocity_command.py`), so a command is never
+non-zero with size ≤ 0.1. A heading-mode robot with no linear command turns toward its target
+until cz drops to 0.1 (about 11° away), then stands. Before that the snap ran only when a command
+was drawn, using a cz that heading mode overwrote on the next step, so a snapped heading-mode
+robot was told to turn in place instead of stand. 09-17-v2 was trained that way, and
+unitree_rl_mjlab still works that way. (From 2026-11-07 to 2026-11-09 a snapped robot was
+instead put in standing mode until its next draw.)
 
 ### Curriculum
 
-- Speed (`lin_vel_cmd_levels`): kept. Once per episode length (1000 steps), if the average
-  `track_lin_vel_xy` reward per second of the resetting robots is above 0.8 × its weight, cx and
-  cy widen by 0.1 on each side, capped at their limits.
-- Turn (`ang_vel_cmd_levels`): **added**. Same rule using `track_ang_vel_z`, widening cz.
+- Speed (`lin_vel_cmd_levels_fixed_std`): kept, same rule as `lin_vel_cmd_levels`. Once per
+  episode length (1000 steps), if the average `track_lin_vel_xy` reward per second of the
+  resetting robots, computed at a fixed std of 0.5, is above 0.8 × its weight, cx and cy widen by
+  0.1 on each side, capped at their limits.
+- Turn (`ang_vel_cmd_levels_fixed_std`): **added**. Same rule using `track_ang_vel_z`, widening
+  cz.
+- The fixed std of 0.5 is the baseline's tracking std, so in the baseline the score is exactly the
+  reward paid. It differs only in experiment 5, where the paid std shrinks; scoring at 0.5 keeps
+  the ranges growing as in the baseline.
 - Terrain level: kept but meaningless (the ground is flat everywhere).
 
-Early in training all three ranges are ±0.1, so about 52% of draws are zero-snapped; with the 5%
-standing share, about 55% of robots stand until the first widening, whatever the heading-mode
-share. This differs from 09-17-v2, where cz was ±1 from the start.
+Early in training all three ranges are ±0.1, so about 52% of non-heading-mode draws are
+zero-snapped. A heading-mode robot is never snapped while it is still turning at the full 0.1, and
+once it faces its target it is snapped whenever its linear command is ≤ 0.1 (about 79% of draws).
+This differs from 09-17-v2, where cz was ±1 from the start.
 
 ### Observations
 
@@ -83,7 +93,9 @@ builds its observation list from the exported `deploy.yaml`, so it follows autom
 | undesired_contacts | -1.0 | number of non-ankle bodies with contact force > 1 N |
 
 Tracking: both kernels use the G1/H1 std of 0.5 (divisor 0.25). Linear tracking covers two
-commands at weight 1.0 and turn tracking one at 0.5, so each command axis is worth 0.5.
+commands at weight 1.0 and turn tracking one at 0.5, so each command axis is worth 0.5. Both
+terms are the `_with_fixed_std_sum` versions in `mdp/rewards.py`: the stock reward, plus each
+robot's episode total at a fixed std of 0.5, which the speed and turn curricula score on.
 
 The `joint_deviation_*` terms are Isaac Lab's `joint_deviation_l1` with G1's joint groups and
 weights, plus a head group (G1 has no head joints).
@@ -98,9 +110,14 @@ Maximum positive reward: 1.0 + 0.5 + 1.0 = 2.5 per second.
 - Timing: 0.005 s physics, 50 Hz policy, 20 s episodes, 4096 robots, flat ground.
 - Robot model, motor gains and limits, action scale 0.25, default pose.
 - Falls: episode ends below 0.2 m pelvis height or above 70° tilt.
-- Randomization: friction 0.3–1.0, torso mass -1 to +3 kg, reset position ±0.5 m and any
-  heading, pushes every 5–6 s (horizontal ±0.5 m/s per axis, vertical ±0.4 m/s, roll and pitch
-  rate ±0.52 rad/s, yaw rate ±0.78 rad/s).
+- Randomization: friction 0.3–1.0 on all bodies, torso mass -1 to +3 kg (a payload on the upper
+  body, not general mass randomization), reset position ±0.5 m and any heading, joints reset to
+  exactly the default pose, pushes every 5–6 s (horizontal ±0.5 m/s per axis, vertical
+  ±0.4 m/s, roll and pitch rate ±0.52 rad/s, yaw rate ±0.78 rad/s). The event terms come from
+  Unitree's G1/H1 template.
+- Removed: `base_external_force_torque`. Its force and torque ranges were 0, so it did nothing
+  and training is unchanged. `reset_robot_joints` stays: it is what returns the joints to the
+  default pose at reset (Isaac Lab does not), even though its velocity range has no effect.
 - PPO settings and network sizes.
 
 ### Reward balance
@@ -135,22 +152,42 @@ maximum positive reward (one line in the config).
 | `exp2_gait_reward_phase.py` | `Unitree-H2-Exp2-GaitRewardPhase` | written |
 | `exp4_heading_0.py` | `Unitree-H2-Exp4-Heading0` | written |
 | `exp4_heading_100.py` | `Unitree-H2-Exp4-Heading100` | written |
+| `exp5_tracking_std_curriculum.py` | `Unitree-H2-Exp5-TrackingStdCurriculum` | written |
+| `exp7_domain_randomization.py` | `Unitree-H2-Exp7-DomainRandomization` | written |
+| `exp10_pose.py` | `Unitree-H2-Exp10-Pose` | written |
 
 Each experiment subclasses `baseline.EnvCfg` and changes only its own setting. Terms that are off
-in the baseline but used by experiments (`gait`, `gait_phase`) are listed in `baseline.py` as
-`None`, with a function that builds them. Tasks are registered in `experiments/__init__.py`. The
+in the baseline but used by several experiments (`gait`, `gait_phase`) are listed in
+`baseline.py` as `None`, with a function that builds them; experiment 7's randomization terms and
+experiment 10's `pose` term are used only there, so they are defined in their own files. Tasks are registered in
+`experiments/__init__.py`. The
 existing `Unitree-H2-Velocity` task's config file (09-17-v2's config) is unchanged, but the
 zero-snap fix (section 1) is in shared code, so retraining it would no longer exactly reproduce
 09-17-v2.
 
-Train with `python scripts/rsl_rl/train.py --task Unitree-H2-Baseline --headless`. Logs go to
-`logs/rsl_rl/<task name lowercased with underscores>/`. Note: train.py copies only the file
+Train on misc (inside tmux, so it survives logging out):
+
+```bash
+tmux new -s h2-baseline
+conda activate unitree_rl_lab
+cd ~/kieran/unitree-humanoidx/unitree_rl_lab
+./unitree_rl_lab.sh -t --task Unitree-H2-Baseline --max_iterations 20000 \
+    --logger wandb --log_project_name humanoidx-isaaclab --run_name baseline_seed42 \
+    2>&1 | tee baseline_seed42.log
+```
+
+`-t` runs `scripts/rsl_rl/train.py --headless`. Detach with `Ctrl-b d`, reattach with
+`tmux attach -t h2-baseline`. Before a first real run of a new config, a quick check:
+`--num_envs 64 --max_iterations 5` without the logger flags.
+
+Logs go to `logs/rsl_rl/<task name lowercased with underscores>/`. Note: train.py copies only the file
 defining the task's class into `params/`, so for an experiment the baseline file is not copied;
 `params/env.yaml` still records the full resolved config.
 
 ### Plan
 
-Each run changes one thing against the baseline. Every policy is evaluated the same way: the
+Each run changes one thing against the baseline, except experiment 7, which adds several kinds of
+randomization at once. Every policy is evaluated the same way: the
 Gazebo eval (`unitree_gz_eval`, default suite, 3 repeats), compared on the `aggregate` run's
 `overall/...` metrics in wandb (see `unitree_ros2_gazebo/README.md`).
 
@@ -160,11 +197,12 @@ Gazebo eval (`unitree_gz_eval`, default suite, 3 repeats), compared on the `aggr
 | 2 | + gait reward + gait phase observation. This is the current H2 gait setup | none | automatic via `deploy.yaml` |
 | 3 | + gait reward + gait phase, with the gait clock reset when walking starts | `gait_phase`, `feet_gait`, C++ `gait_phase` | C++ change |
 | 4 | Heading-mode share 0% and 100% (baseline 50%) | none | none |
-| 5 | Tracking std curriculum 0.5 → 0.05, linear and turn together | new curriculum function; the speed and turn curricula's 0.8 threshold must use a fixed std or they stall | none |
+| 5 | Tracking std curriculum: each tracking term's std 0.5 → 0.05 in steps of 0.05, linear and turn separately | `tracking_std_levels` in `mdp/curriculums.py`; the speed and turn curricula already score at a fixed std (baseline), so they don't stall | none |
 | 6 | Each command axis set to exactly 0 with some probability | command function | none |
-| 7 | Randomized delay (action and/or sensor) | depends on motor model (currently physics-engine PD, no delay) | none |
+| 7 | Domain randomization, all in one run: 0–15 ms action delay, redrawn every policy step; link masses ×0.9–1.1 plus a ±5 cm torso centre-of-mass offset; starting pose ±0.1 rad and joint velocity ±0.1 rad/s per joint. Motor gains not touched. Details below | delayed action term, `mdp/actions.py`; the rest are existing event functions | none |
 | 8 | Unused reward terms, one at a time: `stand_still`, `feet_stumble`, `feet_too_near`, `air_time_variance_penalty`, `joint_mirror`, ... (all in `mdp/rewards.py`) | none | none |
 | 9 | Survival design: no fall penalty with a larger alive bonus, vs. the baseline | none | none |
+| 10 | Pose: the four `joint_deviation_*` penalties replaced by one `pose` penalty (`variable_posture_penalty`, -1.0), the 09-17-v2 `pose` term turned into a penalty | `variable_posture_penalty` in `mdp/rewards.py` | none |
 | later | Pose from an animation | large | — |
 
 Gait experiments run in the order 1, 2, 3.
@@ -177,11 +215,100 @@ Notes:
   2. Without the clock the reward may mostly act as a mild push to keep feet on the ground.
 - **Heading mode (4).** With heading mode, drift is corrected by the command generator rather
   than the policy, and constant turn rates (how `/cmd_vel` drives the deployed robot) are never
-  held. 100% is the 09-17-v2 setting. Snapped robots stand in every heading setting, so the
-  share of standing robots is the same in all three runs.
+  held. 100% is the 09-17-v2 setting. Heading-mode robots are snapped on their actual turn
+  rate, so the share of standing robots differs between the three runs.
+- **Domain randomization (7).** The baseline randomizes little: friction, a torso payload,
+  start position and pushes. Nothing covers mass or centre of mass across the body, latency, or
+  the starting joint state. Experiment 7 adds all three in a single run, so its result is for
+  the set as a whole, not for each part. Motor gains are deliberately left alone. More
+  randomization usually lowers sim tracking scores, so judge this run mainly on the Gazebo
+  eval. Details in the next subsection.
 - **Tracking std curriculum (5).** Small tracking errors currently cost almost nothing:
   exp(-0.1² / 0.25) = 0.96. A tighter std makes small drift matter, but too tight early gives no
-  signal, hence the curriculum.
+  signal, hence the curriculum. On each 1000-step check, a tracking term's std drops by 0.05 if
+  the reward it actually paid averaged above 0.8 × its weight; it never loosens. A reward above
+  0.8 needs an error below about 0.47 × std, so the std stops near twice the robot's typical
+  error, and its final value (`Curriculum/track_lin_vel_xy_std`, `Curriculum/track_ang_vel_z_std`
+  in wandb) measures how precise the robot got. Risk: once the std is tight, a newly unlocked
+  speed can start where the reward is nearly flat (an error of 2 × std pays 0.02).
+- **Pose (10).** The `joint_deviation_*` penalties apply one weight per joint group at every
+  speed, so they penalise the hips and knees for doing what walking requires. `pose` costs
+  1 - exp(-mean over all joints of ((q - q_default) / std)²) at weight -1.0, with each joint's
+  std picked from one of three tables by commanded speed |(cx, cy)| + |cz|: 0.05 rad for every
+  joint when standing (below 0.1), wider when walking, wider again from 1.5. Hip pitch and knee
+  get 0.5 rad while walking; waist roll and pitch stay at 0.1 at every speed to keep the torso
+  upright. Tables are copied from the 09-17-v2 config (`../velocity_env_cfg.py`), where the same
+  term is a +1.0 bonus. As a penalty it ranks poses the same way but, like the terms it replaces,
+  is 0 at the default pose, so it doesn't make staying alive worth more. A single term can't
+  match the four weights it replaces (-0.1 to -1, each on an unbounded sum); -1.0 caps it at
+  1 per second. After both runs, compare the baseline's `Episode_Reward/joint_deviation_*` total
+  with this run's `Episode_Reward/pose`.
+
+### Experiment 7: domain randomization
+
+One task, `Unitree-H2-Exp7-DomainRandomization` (`exp7_domain_randomization.py`): the baseline
+plus all three parts below, together. Motor gains (PD stiffness and damping) are not randomized.
+"Per robot" means each of the 4096 robots draws its own value.
+
+| Part | Randomized | Drawn | Range | Implementation |
+| --- | --- | --- | --- | --- |
+| Delay | Delay before a new joint target reaches the motors | per robot, every policy step | 0–15 ms (0–3 physics steps, uniform) | `DelayedJointPositionActionCfg` (`mdp/actions.py`) replaces the action term |
+| Mass | Mass of every link except the torso; torso centre of mass | per robot, once at startup | ×0.9–1.1 per link; ±5 cm per axis | `randomize_rigid_body_mass` (scale; inertia scales with it), `randomize_rigid_body_com` |
+| Start state | Starting joint angles and joint velocities | per robot, every reset | default ± 0.1 rad; ± 0.1 rad/s; per joint | `reset_joints_by_offset` replaces the baseline's `reset_joints_by_scale` with scale 1 |
+
+**Delay.** Training is fully synchronous: PhysX applies the PD (implicit, no delay) and the
+new target is used from the first physics step after the policy acts. The deployed stack is not:
+in Gazebo the first policy output after a reset lands 2–7 ms after it, torque timing between
+nodes is asynchronous, and identical eval runs diverge (`EVAL_HANDOFF.md`, `PROJECT.md` §6.9).
+The delayed action term keeps the previous joint target for the first d physics steps of each
+policy step, then switches to the new one. d is redrawn per robot every policy step, so each
+target lands at a random point in its 20 ms window. Targets never arrive out of order. d is at
+most 3, so every target is used for at least one physics step. At 4, a target delayed by a full
+step followed by a zero delay would never be used, which happens to 1 in 25 targets.
+
+- Sensor delay is not a separate setting. For a feedback loop what matters is the total time
+  from reading the state to the motor acting on the result, so all of it is put on the action
+  side.
+- 0–15 ms covers the Gazebo measurement (2–7 ms) and the published humanoid ranges of up to
+  10 ms, but not the 10–50 ms some other work uses (`PROJECT.md` §6.9). The term keeps only one
+  previous target, so it can never exceed one policy step (20 ms).
+- Not done with Isaac Lab's `DelayedPDActuatorCfg` (which the repo's `UnitreeActuator` builds
+  on). It delays only by replacing the implicit PD with an explicit one computed at 200 Hz, which
+  would be a second change in the same run and changes how the light joints (wrists) respond. It
+  also draws its delay only at reset. The repo has no motor models for H2's motors, so its
+  torque-speed and friction effects wouldn't apply either.
+- Not covered: in Gazebo the PD itself works from joint readings 1–3 ms old, because it runs in
+  a ROS node. That is Gazebo-only (the real motor driver runs its PD next to the motor), and a
+  policy can't compensate for it. It's what makes the wrists shake while standing.
+- Success here is mainly a smaller spread between repeats of the Gazebo eval, not only a better
+  mean.
+
+**Mass.** `randomize_rigid_body_mass` resets the bodies it is given to their default mass
+before applying its change. Including the torso would erase the baseline's -1 to +3 kg torso
+payload, so the torso is left out of the scaling and keeps the payload. The centre-of-mass range
+is unitree_rl_mjlab's `base_com`, which its H2 config applies to `torso_link`. Both are drawn
+once, at startup. The centre-of-mass event adds to the current value, so it must not run at reset.
+
+**Start state.** Offsets rather than the 0.5–1.5 scale Isaac Lab uses for quadrupeds (this
+repo's G1 and H1 configs set that scale to 1, i.e. off):
+
+- A scale leaves every joint whose default is 0 at exactly 0. That's the waist, hip roll and
+  yaw, ankle roll, wrists, head and most of the shoulder joints.
+- On the legs a scale changes leg length by several cm. The pelvis is still placed at 1.03 m, so
+  the feet start inside the ground (up to about 2 cm) or above it (up to about 7 cm).
+- ±0.1 rad on every joint keeps the feet within about 1 cm below and 3 cm above their default
+  height (H2.urdf: thigh 0.41 m, shin 0.50 m). Values are clamped to the soft joint limits.
+- Joint velocities start at ±0.1 rad/s per joint (an offset on the default of 0) instead of 0.
+
+The Gazebo eval always starts from the exact default pose, so this part may show little there.
+It is about recovering from off-nominal poses after pushes and at hardware start-up.
+
+What to watch, beyond the usual checks under "Reward balance":
+
+- Tracking rewards should drop a little. A large drop, or fall terminations rising, means the
+  ranges are too wide for this reward setup rather than that randomization doesn't help.
+- The delay can make the policy stiffer or more hesitant. `action_rate` and `joint_acc` show it.
+- If the run is clearly worse, split it into one run per part to find which one is responsible.
 
 ---
 
@@ -197,7 +324,7 @@ G1 is `robots/g1/29dof/velocity_env_cfg.py`; current H2 is `robots/h2/velocity_e
 | cz | ±0.1 → ±1.0 (curriculum) | ±1.0 from the start | ±0.1 throughout training (no turn curriculum; ±0.2 only in play mode) |
 | Heading mode | 50% | 100% | off (constant turn rates) |
 | Standing | 5% | 5% | 2% |
-| Zero-snap | yes; snapped robots stand | yes, but heading mode turned snapped robots in place (trained before the fix) | no |
+| Zero-snap | yes, every step | yes, but heading mode turned snapped robots in place (trained before the fix) | no |
 | Gait phase observation | no | yes (0.8 s period, zero when standing) | no (commented out) |
 | History | 5 | 5 | 5 |
 | track_lin_vel_xy | 1.0, divisor 0.25 | 1.0, divisor 0.25 | 1.0, divisor 0.25 |

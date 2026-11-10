@@ -142,8 +142,8 @@ Consequences worth knowing:
   error is above 2 rad.
 - The zero-snap uses the drawn $c_z$ before it is overwritten. A snapped command still gets a
   steering $c_z$ on the next step, so in practice it only zeroes $c_x$ and $c_y$. (That is how
-  09-17-v2 was trained. Since 2026-11-07 a snapped robot is put in standing mode until its next
-  draw, so a retrain would stand instead; see `EXPERIMENTS.md`.)
+  09-17-v2 was trained. Since 2026-11-09 the snap is checked every step on the command actually
+  given, so a retrain behaves differently; see `EXPERIMENTS.md`.)
 - On the deployed robot, the turn rate comes straight from `/cmd_vel`; nothing steers to a
   heading.
 
