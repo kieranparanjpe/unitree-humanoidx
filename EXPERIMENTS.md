@@ -31,7 +31,7 @@ The baseline needs no new functions; every term below already exists in Isaac La
 | Zero-snap | kept, and checked every step: whenever the command's size sqrt(cx² + cy² + cz²) is ≤ 0.1 it is set to 0 |
 
 Each axis is drawn uniformly and independently; no axis is ever exactly 0 except through the
-zero-snap (which zeroes all three).
+zero-snap (which zeroes all three). Experiment 6 tests zeroing single axes.
 
 Since 2026-11-09 the snap runs every step, after heading mode has set that step's cz
 (`UniformLevelVelocityCommand`, `mdp/commands/velocity_command.py`), so a command is never
@@ -48,11 +48,11 @@ instead put in standing mode until its next draw.)
   episode length (1000 steps), if the average `track_lin_vel_xy` reward per second of the
   resetting robots, computed at a fixed std of 0.5, is above 0.8 × its weight, cx and cy widen by
   0.1 on each side, capped at their limits.
-- Turn (`ang_vel_cmd_levels_fixed_std`): **added**. Same rule using `track_ang_vel_z`, widening
-  cz.
-- The fixed std of 0.5 is the baseline's tracking std, so in the baseline the score is exactly the
-  reward paid. It differs only in experiment 5, where the paid std shrinks; scoring at 0.5 keeps
-  the ranges growing as in the baseline.
+- Turn (`ang_vel_cmd_levels_fixed_std`): **added**. Same rule using `track_ang_vel_z` at a fixed
+  std of 1.0, widening cz.
+- The fixed stds are the baseline's tracking stds (0.5 linear, 1.0 turn), so in the baseline the
+  score is exactly the reward paid. They differ only in experiment 5, where the paid std shrinks;
+  scoring at the fixed values keeps the ranges growing as in the baseline.
 - Terrain level: kept but meaningless (the ground is flat everywhere).
 
 Early in training all three ranges are ±0.1, so about 52% of non-heading-mode draws are
@@ -71,7 +71,7 @@ builds its observation list from the exported `deploy.yaml`, so it follows autom
 | Term | Weight | Value |
 | --- | --- | --- |
 | track_lin_vel_xy | 1.0 | exp(-((cx - vx)² + (cy - vy)²) / 0.25), velocity in the heading frame |
-| track_ang_vel_z | 0.5 | exp(-(cz - ωz)² / 0.25) |
+| track_ang_vel_z | 0.5 | exp(-(cz - ωz)² / 1.0) |
 | alive | 1.0 | 1 while not fallen |
 | is_terminated | -200 | 1 on the step of a fall (costs 4 once) |
 | base_linear_velocity | -2.0 | vz² |
@@ -92,10 +92,12 @@ builds its observation list from the exported `deploy.yaml`, so it follows autom
 | feet_contact_forces | -0.0002 | Σ over feet max(0, contact force - 500 N) |
 | undesired_contacts | -1.0 | number of non-ankle bodies with contact force > 1 N |
 
-Tracking: both kernels use the G1/H1 std of 0.5 (divisor 0.25). Linear tracking covers two
-commands at weight 1.0 and turn tracking one at 0.5, so each command axis is worth 0.5. Both
-terms are the `_with_fixed_std_sum` versions in `mdp/rewards.py`: the stock reward, plus each
-robot's episode total at a fixed std of 0.5, which the speed and turn curricula score on.
+Tracking: linear tracking uses the G1/H1 std of 0.5 (divisor 0.25), turn tracking a std of 1.0
+(divisor 1.0; it was 0.5 until experiment 12 was added to the baseline on 2026-11-10). Linear
+tracking covers two commands at weight 1.0 and turn tracking one at 0.5, so each command axis is
+worth 0.5. Both terms are the `_with_fixed_std_sum` versions in `mdp/rewards.py`: the stock
+reward, plus each robot's episode total at a fixed std (the same 0.5 and 1.0), which the speed
+and turn curricula score on.
 
 The `joint_deviation_*` terms are Isaac Lab's `joint_deviation_l1` with G1's joint groups and
 weights, plus a head group (G1 has no head joints).
@@ -153,10 +155,11 @@ maximum positive reward (one line in the config).
 | `exp4_heading_0.py` | `Unitree-H2-Exp4-Heading0` | written |
 | `exp4_heading_100.py` | `Unitree-H2-Exp4-Heading100` | written |
 | `exp5_tracking_std_curriculum.py` | `Unitree-H2-Exp5-TrackingStdCurriculum` | written |
+| `exp6_zero_axes.py` | `Unitree-H2-Exp6-ZeroAxes` | written |
 | `exp7_domain_randomization.py` | `Unitree-H2-Exp7-DomainRandomization` | written |
 | `exp10_pose.py` | `Unitree-H2-Exp10-Pose` | written |
 | `exp11_alive_2.py` | `Unitree-H2-Exp11-Alive2` | written |
-| `exp12_ang_std_1.py` | `Unitree-H2-Exp12-AngStd1` | written |
+| `exp12_ang_std_1.py` | `Unitree-H2-Exp12-AngStd1` | run; added to the baseline, so it now equals the baseline |
 
 Each experiment subclasses `baseline.EnvCfg` and changes only its own setting. Terms that are off
 in the baseline but used by several experiments (`gait`, `gait_phase`) are listed in
@@ -199,18 +202,19 @@ Gazebo eval (`unitree_gz_eval`, default suite, 3 repeats), compared on the `aggr
 | 2 | + gait reward + gait phase observation. This is the current H2 gait setup | none | automatic via `deploy.yaml` |
 | 3 | + gait reward + gait phase, with the gait clock reset when walking starts | `gait_phase`, `feet_gait`, C++ `gait_phase` | C++ change |
 | 4 | Heading-mode share 0% and 100% (baseline 50%) | none | none |
-| 5 | Tracking std curriculum: each tracking term's std 0.5 → 0.05 in steps of 0.05, linear and turn separately | `tracking_std_levels` in `mdp/curriculums.py`; the speed and turn curricula already score at a fixed std (baseline), so they don't stall | none |
-| 6 | Each command axis set to exactly 0 with some probability | command function | none |
+| 5 | Tracking std curriculum: paid σ_lin 0.5 → 0.05 and paid σ_ang 1.0 → 0.05, in steps of 0.05, separately. Scoring σ_lin and σ_ang stay at 0.5 and 1.0 | `tracking_std_levels` in `mdp/curriculums.py`; the speed and turn curricula already score at a fixed std (baseline), so they don't stall | none |
+| 6 | Each axis of a new command set to exactly 0 with probability 0.3, independently per axis, for robots not in heading mode | `zero_axis_prob` in `UniformLevelVelocityCommand` | none |
 | 7 | Domain randomization, all in one run: 0–15 ms action delay, redrawn every policy step; link masses ×0.9–1.1 plus a ±5 cm torso centre-of-mass offset; starting pose ±0.1 rad and joint velocity ±0.1 rad/s per joint. Motor gains not touched. Details below | delayed action term, `mdp/actions.py`; the rest are existing event functions | none |
 | 8 | Unused reward terms, one at a time: `stand_still`, `feet_stumble`, `feet_too_near`, `air_time_variance_penalty`, `joint_mirror`, ... (all in `mdp/rewards.py`) | none | none |
 | 9 | Survival design: no fall penalty with a larger alive bonus, vs. the baseline | none | none |
 | 10 | Pose: the four `joint_deviation_*` penalties replaced by one `pose` penalty (`variable_posture_penalty`, -1.0), the 09-17-v2 `pose` term turned into a penalty | `variable_posture_penalty` in `mdp/rewards.py` | none |
 | 11 | Alive 2.0 (baseline 1.0) | none | none |
-| 12 | σ_ang = 1.0 for `track_ang_vel_z`, paid and scoring (baseline 0.5 for both) | none | none |
+| 12 | σ_ang = 1.0 for `track_ang_vel_z`, paid and scoring (baseline then 0.5 for both). Worked; added to the baseline 2026-11-10 | none | none |
 | later | Pose from an animation | large | — |
 
-Gait experiments run in the order 1, 2, 3. Experiments 12 and then 11 run first, right after the
-baseline. If one works, it is added to the baseline before the next experiment runs.
+Gait experiments run in the order 1, 2, 3. Experiment 12 ran first, right after the baseline, and
+was added to it on 2026-11-10. Experiment 6 runs next, then 11. If one works, it is added to the
+baseline before the next experiment runs.
 
 Notes:
 
@@ -228,14 +232,26 @@ Notes:
   the set as a whole, not for each part. Motor gains are deliberately left alone. More
   randomization usually lowers sim tracking scores, so judge this run mainly on the Gazebo
   eval. Details in the next subsection.
-- **Tracking std curriculum (5).** Small tracking errors currently cost almost nothing:
-  exp(-0.1² / 0.25) = 0.96. A tighter std makes small drift matter, but too tight early gives no
+- **Tracking std curriculum (5).** Small tracking errors currently cost almost nothing: an error
+  of 0.1 pays exp(-0.1² / 0.5²) = 0.96 for linear tracking and exp(-0.1² / 1²) = 0.99 for
+  turning. A tighter std makes small drift matter, but too tight early gives no
   signal, hence the curriculum. On each 1000-step check, a tracking term's std drops by 0.05 if
   the reward it actually paid averaged above 0.8 × its weight; it never loosens. A reward above
   0.8 needs an error below about 0.47 × std, so the std stops near twice the robot's typical
   error, and its final value (`Curriculum/track_lin_vel_xy_std`, `Curriculum/track_ang_vel_z_std`
   in wandb) measures how precise the robot got. Risk: once the std is tight, a newly unlocked
   speed can start where the reward is nearly flat (an error of 2 × std pays 0.02).
+- **Zeroed command axes (6).** Each axis is drawn independently, so none is ever exactly 0, and
+  turning in place needs both linear axes to land near 0 (about 2% of draws). Experiment 12's
+  Gazebo eval turned in place poorly (right spin at 12% of the commanded 1.0 rad/s, half_square's
+  0.5 rad/s left turns at 33%) while its walking turns were fine in both directions. Here each
+  axis of a new command is set to 0 with probability 0.3, independently, for robots not in
+  heading mode (47.5% of draws); heading-mode robots are unchanged. About 31% of all draws get at
+  least one zeroed axis and about 3% become a turn in place, on top of the 2% already there. The
+  zero-snap still runs every step, so a command left with one small axis stands. It works if
+  in-place turning in the Gazebo eval (spin, half_square) improves in both directions, with
+  walking, standing and pushes no worse. Zeroed commands are easier to track, so the speed and
+  turn limits may widen sooner; compare `Curriculum/*` against the baseline.
 - **Pose (10).** The `joint_deviation_*` penalties apply one weight per joint group at every
   speed, so they penalise the hips and knees for doing what walking requires. `pose` costs
   1 - exp(-mean over all joints of ((q - q_default) / std)²) at weight -1.0, with each joint's
@@ -264,6 +280,11 @@ Notes:
   would score about 0.85 at σ_ang = 1.0. It works if `Curriculum/ang_vel_cmd_levels` rises with
   linear tracking, survival and the Gazebo eval no worse. Then the baseline's paid and scoring
   σ_ang both become 1.0, and experiment 5's σ_ang curriculum starts from 1.0.
+  Result (wandb `crjat5kz` against baseline `r3yy2pa3`, seed 42, 20k iterations): the turn-rate
+  limit reached ±1.0 by iteration 12.4k (the baseline's stayed at 0.1), and linear tracking,
+  episode length and falls were unchanged. In the Gazebo eval, linear tracking, heading and push
+  survival were as good as the baseline or better, and walking turns worked in both directions,
+  but turning in place was weak (see experiment 6). Added to the baseline on 2026-11-10.
 
 ### Experiment 7: domain randomization
 
@@ -349,7 +370,7 @@ G1 is `robots/g1/29dof/velocity_env_cfg.py`; current H2 is `robots/h2/velocity_e
 | Gait phase observation | no | yes (0.8 s period, zero when standing) | no (commented out) |
 | History | 5 | 5 | 5 |
 | track_lin_vel_xy | 1.0, divisor 0.25 | 1.0, divisor 0.25 | 1.0, divisor 0.25 |
-| track_ang_vel_z | 0.5, divisor 0.25 | 1.0, divisor 0.5 | 0.5, divisor 0.25 |
+| track_ang_vel_z | 0.5, divisor 1.0 | 1.0, divisor 0.5 | 0.5, divisor 0.25 |
 | alive | 1.0 | 1.0 | 0.15 |
 | Fall penalty | -200 | -200 | none |
 | Pose | G1 joint_deviation groups + head | `variable_posture` +1.0 | joint_deviation: arms -0.1, waist -1, hip roll/yaw -1 |
