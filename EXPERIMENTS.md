@@ -155,6 +155,8 @@ maximum positive reward (one line in the config).
 | `exp5_tracking_std_curriculum.py` | `Unitree-H2-Exp5-TrackingStdCurriculum` | written |
 | `exp7_domain_randomization.py` | `Unitree-H2-Exp7-DomainRandomization` | written |
 | `exp10_pose.py` | `Unitree-H2-Exp10-Pose` | written |
+| `exp11_alive_2.py` | `Unitree-H2-Exp11-Alive2` | written |
+| `exp12_ang_std_1.py` | `Unitree-H2-Exp12-AngStd1` | written |
 
 Each experiment subclasses `baseline.EnvCfg` and changes only its own setting. Terms that are off
 in the baseline but used by several experiments (`gait`, `gait_phase`) are listed in
@@ -203,9 +205,12 @@ Gazebo eval (`unitree_gz_eval`, default suite, 3 repeats), compared on the `aggr
 | 8 | Unused reward terms, one at a time: `stand_still`, `feet_stumble`, `feet_too_near`, `air_time_variance_penalty`, `joint_mirror`, ... (all in `mdp/rewards.py`) | none | none |
 | 9 | Survival design: no fall penalty with a larger alive bonus, vs. the baseline | none | none |
 | 10 | Pose: the four `joint_deviation_*` penalties replaced by one `pose` penalty (`variable_posture_penalty`, -1.0), the 09-17-v2 `pose` term turned into a penalty | `variable_posture_penalty` in `mdp/rewards.py` | none |
+| 11 | Alive 2.0 (baseline 1.0) | none | none |
+| 12 | σ_ang = 1.0 for `track_ang_vel_z`, paid and scoring (baseline 0.5 for both) | none | none |
 | later | Pose from an animation | large | — |
 
-Gait experiments run in the order 1, 2, 3.
+Gait experiments run in the order 1, 2, 3. Experiments 12 and then 11 run first, right after the
+baseline. If one works, it is added to the baseline before the next experiment runs.
 
 Notes:
 
@@ -243,6 +248,22 @@ Notes:
   match the four weights it replaces (-0.1 to -1, each on an unbounded sum); -1.0 caps it at
   1 per second. After both runs, compare the baseline's `Episode_Reward/joint_deviation_*` total
   with this run's `Episode_Reward/pose`.
+- **Alive 2.0 (11).** At iteration 3000 of the first baseline run, episodes averaged 530 of 1000
+  steps against 873 for 09-17-v2, and the reward while up was about -1.4 per second (penalties
+  above alive plus tracking), so only the fall penalty made staying up worth it. Most of the gap
+  to 09-17-v2 was its `gait` bonus (about +0.5 per second). Alive 2.0 adds 1 per second while up;
+  once robots stop falling it is the same constant for every policy. If it learns noticeably
+  faster (episode length, the iteration where the speed limits first widen) and is no worse
+  otherwise, including the Gazebo eval, the baseline's alive becomes 2.0 before the other
+  experiments run.
+- **σ_ang 1.0 (12).** Paid σ_ang is the `std` the yaw reward uses; scoring σ_ang is the
+  `fixed_std` the turn-rate limit curriculum scores with. In the baseline both are 0.5, and they
+  are always equal there. The turn-rate limit widens only when the yaw reward at scoring σ_ang
+  averages above 0.8. With the same yaw term, 09-10 settled at 0.60, and in the first baseline run
+  the limit had not widened by iteration 4500. 09-10's per-step yaw error (about 0.385 rad/s)
+  would score about 0.85 at σ_ang = 1.0. It works if `Curriculum/ang_vel_cmd_levels` rises with
+  linear tracking, survival and the Gazebo eval no worse. Then the baseline's paid and scoring
+  σ_ang both become 1.0, and experiment 5's σ_ang curriculum starts from 1.0.
 
 ### Experiment 7: domain randomization
 
