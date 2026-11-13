@@ -155,7 +155,9 @@ maximum positive reward (one line in the config).
 | `exp2_gait_reward_phase.py` | `Unitree-H2-Exp2-GaitRewardPhase` | written |
 | `exp4_heading_0.py` | `Unitree-H2-Exp4-Heading0` | written |
 | `exp4_heading_100.py` | `Unitree-H2-Exp4-Heading100` | written |
-| `exp5_tracking_std_curriculum.py` | `Unitree-H2-Exp5-TrackingStdCurriculum` | written |
+| `exp5_tracking_std_curriculum.py` | `Unitree-H2-Exp5-TrackingStdCurriculum` | run; curricula froze, see 5a |
+| `exp5a_std_curriculum_all_resets.py` | `Unitree-H2-Exp5a-StdCurriculumAllResets` | written |
+| `exp5b_all_curricula_all_resets.py` | `Unitree-H2-Exp5b-AllCurriculaAllResets` | written |
 | `exp6_zero_axes.py` | `Unitree-H2-Exp6-ZeroAxes` | run at σ_ang 1.0, not added (in-place turning got worse); runs again against the current baseline |
 | `exp7_domain_randomization.py` | `Unitree-H2-Exp7-DomainRandomization` | written |
 | `exp10_pose.py` | `Unitree-H2-Exp10-Pose` | written |
@@ -205,6 +207,8 @@ Gazebo eval (`unitree_gz_eval`, default suite, 3 repeats), compared on the `aggr
 | 3 | + gait reward + gait phase, with the gait clock reset when walking starts | `gait_phase`, `feet_gait`, C++ `gait_phase` | C++ change |
 | 4 | Heading-mode share 0% and 100% (baseline 50%) | none | none |
 | 5 | Tracking std curriculum: paid σ_lin 0.5 → 0.05 and paid σ_ang 0.5 → 0.05, in steps of 0.05, separately, each shrinking at its speed curriculum's bar (0.8 linear, 0.4 turn). Scoring σ_lin and σ_ang stay at 0.5 | `tracking_std_levels` (with a `threshold` parameter) in `mdp/curriculums.py`; the speed and turn curricula already score at a fixed std (baseline), so they don't stall | none |
+| 5a | Experiment 5 with the std curriculum judged on every robot whose episode ended since the last check. Every curriculum judges only the robots resetting on the check step; once robots stop falling that is about 4 fixed robots, or none. In experiment 5's run (2026-11-12) all curricula froze from 6.6k to 15.9k, then one robot drove σ_ang 0.45 → 0.25 in about 125 iterations | `tracking_std_levels_all_resets` in `mdp/curriculums.py` | none |
+| 5b | 5a, with the speed and turn curricula judged the same way, in case 5a's ranges stall as 5's did | `lin_vel_cmd_levels_fixed_std_all_resets`, `ang_vel_cmd_levels_fixed_std_all_resets` | none |
 | 6 | Each axis of a new command set to exactly 0 with probability 0.3, independently per axis, for robots not in heading mode. Did not help at σ_ang 1.0 (2026-11-11); runs again against the current baseline | `zero_axis_prob` in `UniformLevelVelocityCommand` | none |
 | 7 | Domain randomization, all in one run: 0–15 ms action delay, redrawn every policy step; link masses ×0.9–1.1 plus a ±5 cm torso centre-of-mass offset; starting pose ±0.1 rad and joint velocity ±0.1 rad/s per joint. Motor gains not touched. Details below | delayed action term, `mdp/actions.py`; the rest are existing event functions | none |
 | 8 | Unused reward terms, one at a time: `stand_still`, `feet_stumble`, `feet_too_near`, `air_time_variance_penalty`, `joint_mirror`, ... (all in `mdp/rewards.py`) | none | none |
@@ -219,9 +223,10 @@ Gazebo eval (`unitree_gz_eval`, default suite, 3 repeats), compared on the `aggr
 
 Gait experiments run in the order 1, 2, 3. Experiment 12 ran first, right after the baseline, and
 was added to it on 2026-11-10. Experiment 6 ran next and did not work. Experiment 14 ran next and
-was added to the baseline on 2026-11-11, replacing 12. Experiment 11 runs next, then 6 again
-against the current baseline, then 1, 2, 5, 7 and 10. Experiments 13 and 15 are not scheduled
-yet. If one works, it is added to the baseline before the next experiment runs.
+was added to the baseline on 2026-11-11, replacing 12. Experiment 11 runs next, then 6 again,
+then 1, 2, 5, 7 and 10. If 11 works it is added to the baseline first; 6, 1, 2, 5, 7 and 10 are
+each run against that baseline and reported, not added. Experiments 13 and 15 are not scheduled
+yet.
 
 Notes:
 
@@ -258,9 +263,9 @@ Notes:
   axis of a new command is set to 0 with probability 0.3, independently, for robots not in
   heading mode (47.5% of draws); heading-mode robots are unchanged. About 31% of all draws get at
   least one zeroed axis and about 3% become a turn in place, on top of the 2% already there. The
-  zero-snap still runs every step, so a command left with one small axis stands. It works if
-  in-place turning in the Gazebo eval (spin, half_square) improves in both directions, with
-  walking, standing and pushes no worse. Zeroed commands are easier to track, so the speed and
+  zero-snap still runs every step, so a command left with one small axis stands. The main thing
+  to look at is in-place turning in the Gazebo eval (spin, half_square) in both directions,
+  along with walking, standing and pushes. Zeroed commands are easier to track, so the speed and
   turn limits may widen sooner; compare `Curriculum/*` against the baseline.
   Result (wandb `okblyzcb` against `crjat5kz`, seed 42, 20k iterations): training matched
   experiment 12, but in-place turning got worse in Gazebo (spin left 0.15 rad/s against 0.71,
@@ -268,11 +273,11 @@ Notes:
   with fixed commands, neither experiment 6 nor 12 starts an in-place turn from standing
   (experiment 12 manages only the left spin at 1.0 rad/s); from walking both turn. Not added to
   the baseline.
-  Runs again against the current baseline (σ_ang 0.5, turn bar 0.4). Experiment 14 fixed spins
-  at 1.0 rad/s but still doesn't start a 0.5 rad/s turn from standing, and the first run may have
-  failed because at σ_ang 1.0 standing still earned most of the turn reward. It works if the
-  Isaac check's ±0.5 rad/s turns from standing no longer stall, with spins, half_square,
-  walking, standing and pushes no worse than experiment 14.
+  Runs again against the current baseline (σ_ang 0.5, turn bar 0.4) as an ordinary experiment:
+  reported, not added to the baseline. At σ_ang 1.0 standing still earned most of the turn
+  reward, which may explain the first run. Experiment 14 fixed spins at 1.0 rad/s but still
+  doesn't start a 0.5 rad/s turn from standing; the Isaac check shows whether zeroing changes
+  that.
 - **Turn reward σ_ang 0.5 with a lower turn bar (14).** At σ_ang 1.0 a robot standing still
   under a 0.5 rad/s turn command earns 78% of the turn reward (37% at σ_ang 0.5), so starting a
   turn from standing barely pays (see experiment 6's result). This puts σ_ang back to 0.5, paid
@@ -307,10 +312,12 @@ Notes:
   steps against 873 for 09-17-v2, and the reward while up was about -1.4 per second (penalties
   above alive plus tracking), so only the fall penalty made staying up worth it. Most of the gap
   to 09-17-v2 was its `gait` bonus (about +0.5 per second). Alive 2.0 adds 1 per second while up;
-  once robots stop falling it is the same constant for every policy. If it learns noticeably
-  faster (episode length, the iteration where the speed limits first widen) and is no worse
-  otherwise, including the Gazebo eval, the baseline's alive becomes 2.0 before the other
-  experiments run.
+  once robots stop falling it is the same constant for every policy. The point is shorter
+  training for every later experiment. It is compared with the baseline at the same iteration
+  (episode length, when the speed and turn limits max out, tracking errors, falls) and stopped
+  if it isn't faster by 10–15k iterations. If it is, the checkpoint where its curves level off
+  gets a Gazebo eval against the baseline's 20k eval; if it is no worse, alive becomes 2.0 and
+  later experiments train to that checkpoint plus 2k iterations (at least 12k) instead of 20k.
 - **σ_ang 1.0 (12).** Paid σ_ang is the `std` the yaw reward uses; scoring σ_ang is the
   `fixed_std` the turn-rate limit curriculum scores with. In the baseline both are 0.5, and they
   are always equal there. The turn-rate limit widens only when the yaw reward at scoring σ_ang
