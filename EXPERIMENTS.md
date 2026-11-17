@@ -164,6 +164,7 @@ maximum positive reward (one line in the config).
 | `exp10_pose.py` | `Unitree-H2-Exp10-Pose` | written |
 | `exp11_alive_2.py` | `Unitree-H2-Exp11-Alive2` | written |
 | `exp12_ang_std_1.py` | `Unitree-H2-Exp12-AngStd1` | run; added to the baseline, then replaced by experiment 14 |
+| `exp13_filtered_turn_reward.py` | `Unitree-H2-Exp13-FilteredTurnReward` | written |
 | `exp14_ang_std_05_bar_04.py` | `Unitree-H2-Exp14-AngStd05Bar04` | run; added to the baseline, so it now equals the baseline |
 
 Each experiment subclasses `baseline.EnvCfg` and changes only its own setting. Terms that are off
@@ -218,7 +219,7 @@ Gazebo eval (`unitree_gz_eval`, default suite, 3 repeats), compared on the `aggr
 | 10 | Pose: the four `joint_deviation_*` penalties replaced by one `pose` penalty (`variable_posture_penalty`, -1.0), the 09-17-v2 `pose` term turned into a penalty | `variable_posture_penalty` in `mdp/rewards.py` | none |
 | 11 | Alive 2.0 (baseline 1.0) | none | none |
 | 12 | σ_ang = 1.0 for `track_ang_vel_z`, paid and scoring (baseline then 0.5 for both). Worked; added to the baseline 2026-11-10, replaced by 14 on 2026-11-11 | none | none |
-| 13 | Filtered turn reward: `track_ang_vel_z` scores a smoothed turn-rate error (moving average of cz − ωz, time constant about 0.5 s) instead of the per-step error, so pelvis sway within each stride isn't punished. Paid and scoring use the same smoothed error. Not written | a yaw tracking term with a per-robot filter state; the smoothed error added to the critic observation | none |
+| 13 | Filtered turn reward: `track_ang_vel_z` scores a smoothed turn-rate error (moving average of cz − ωz, time constant about 0.5 s) instead of the per-step error, so pelvis sway within each stride isn't punished. Paid and scoring use the same smoothed error | a yaw tracking term with a per-robot filter state; the smoothed error added to the critic observation | none |
 | 14 | σ_ang back to 0.5, paid and scoring, with the turn curriculum's bar lowered from 0.8 to 0.4. Worked; added to the baseline 2026-11-11 | `threshold` parameter on `ang_vel_cmd_levels_fixed_std` | none |
 | 15 | Left/right symmetry: each PPO update also trains on the mirror image of its batch (rsl_rl's symmetry data augmentation). Not written | H2 mirror function for observations and actions; a PPO config for this task | none |
 | later | Pose from an animation | large | — |
