@@ -158,6 +158,7 @@ maximum positive reward (one line in the config).
 | `exp5_tracking_std_curriculum.py` | `Unitree-H2-Exp5-TrackingStdCurriculum` | run; curricula froze, see 5a |
 | `exp5a_std_curriculum_all_resets.py` | `Unitree-H2-Exp5a-StdCurriculumAllResets` | written |
 | `exp5b_all_curricula_all_resets.py` | `Unitree-H2-Exp5b-AllCurriculaAllResets` | written |
+| `exp5c_lin_std_curriculum.py` | `Unitree-H2-Exp5c-LinStdCurriculum` | written |
 | `exp6_zero_axes.py` | `Unitree-H2-Exp6-ZeroAxes` | run at σ_ang 1.0, not added (in-place turning got worse); runs again against the current baseline |
 | `exp7_domain_randomization.py` | `Unitree-H2-Exp7-DomainRandomization` | written |
 | `exp10_pose.py` | `Unitree-H2-Exp10-Pose` | written |
@@ -209,6 +210,7 @@ Gazebo eval (`unitree_gz_eval`, default suite, 3 repeats), compared on the `aggr
 | 5 | Tracking std curriculum: paid σ_lin 0.5 → 0.05 and paid σ_ang 0.5 → 0.05, in steps of 0.05, separately, each shrinking at its speed curriculum's bar (0.8 linear, 0.4 turn). Scoring σ_lin and σ_ang stay at 0.5 | `tracking_std_levels` (with a `threshold` parameter) in `mdp/curriculums.py`; the speed and turn curricula already score at a fixed std (baseline), so they don't stall | none |
 | 5a | Experiment 5 with the std curriculum judged on every robot whose episode ended since the last check. Every curriculum judges only the robots resetting on the check step; once robots stop falling that is about 4 fixed robots, or none. In experiment 5's run (2026-11-12) all curricula froze from 6.6k to 15.9k, then one robot drove σ_ang 0.45 → 0.25 in about 125 iterations | `tracking_std_levels_all_resets` in `mdp/curriculums.py` | none |
 | 5b | 5a, with the speed and turn curricula judged the same way, in case 5a's ranges stall as 5's did | `lin_vel_cmd_levels_fixed_std_all_resets`, `ang_vel_cmd_levels_fixed_std_all_resets` | none |
+| 5c | 5a with only the σ_lin curriculum; paid and scoring σ_ang stay 0.5. In 5, 5a and 5b both σs shrank and in-place turning failed, so this shows which one caused it | none | none |
 | 6 | Each axis of a new command set to exactly 0 with probability 0.3, independently per axis, for robots not in heading mode. Did not help at σ_ang 1.0 (2026-11-11); runs again against the current baseline | `zero_axis_prob` in `UniformLevelVelocityCommand` | none |
 | 7 | Domain randomization, all in one run: 0–15 ms action delay, redrawn every policy step; link masses ×0.9–1.1 plus a ±5 cm torso centre-of-mass offset; starting pose ±0.1 rad and joint velocity ±0.1 rad/s per joint. Motor gains not touched. Details below | delayed action term, `mdp/actions.py`; the rest are existing event functions | none |
 | 8 | Unused reward terms, one at a time: `stand_still`, `feet_stumble`, `feet_too_near`, `air_time_variance_penalty`, `joint_mirror`, ... (all in `mdp/rewards.py`) | none | none |
