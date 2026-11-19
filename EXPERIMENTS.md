@@ -167,6 +167,8 @@ maximum positive reward (one line in the config).
 | `exp13_filtered_turn_reward.py` | `Unitree-H2-Exp13-FilteredTurnReward` | written |
 | `exp14_ang_std_05_bar_04.py` | `Unitree-H2-Exp14-AngStd05Bar04` | run; added to the baseline, so it now equals the baseline |
 | `exp16a_fine_tracking.py` | `Unitree-H2-Exp16a-FineTracking` | written |
+| `exp17_mjlab_mirror.py` | `Unitree-H2-Exp17-MjlabMirror` | written; self-contained, not a baseline subclass; own PPO config |
+| `exp18_h1_setup.py` | `Unitree-H2-Exp18-H1Setup` | written; self-contained, not a baseline subclass |
 
 Each experiment subclasses `baseline.EnvCfg` and changes only its own setting. Terms that are off
 in the baseline but used by several experiments (`gait`, `gait_phase`) are listed in
@@ -224,6 +226,8 @@ Gazebo eval (`unitree_gz_eval`, default suite, 3 repeats), compared on the `aggr
 | 14 | σ_ang back to 0.5, paid and scoring, with the turn curriculum's bar lowered from 0.8 to 0.4. Worked; added to the baseline 2026-11-11 | `threshold` parameter on `ang_vel_cmd_levels_fixed_std` | none |
 | 15 | Left/right symmetry: each PPO update also trains on the mirror image of its batch (rsl_rl's symmetry data augmentation). Not written | H2 mirror function for observations and actions; a PPO config for this task | none |
 | 16a | Fine tracking terms next to the coarse ones: `track_lin_vel_xy_fine` (paid σ_lin 0.25, weight 0.5) and `track_ang_vel_z_fine` (paid σ_ang 0.25, weight 0.25), same errors as the existing terms, which stay at paid and scoring σ 0.5. Curricula still score on the coarse terms. A static alternative to the σ curricula (5–5c), which shrink the only term and lose the gradient at large errors. From an H1_2 Isaac Lab setup deployed on hardware (gaetanotorella/H1_2_Squat_Locomotion_RL) | none (Isaac Lab's `track_lin_vel_xy_yaw_frame_exp`, `track_ang_vel_z_exp`) | none |
+| 17 | unitree_rl_mjlab's H2 flat velocity task (mjlab 1.2.0) rebuilt in Isaac Lab as closely as Isaac Lab allows: its effort limits and action scales, observations (no history, no scaling, gait phase 0.6 s, critic foot observations), commands (heading mode for all moving robots, zero-snap at the draw only, ranges widened at iteration 5000 to x −1..2, y ±1), rewards (no alive bonus), terminations, foot friction, torso centre-of-mass offset, observation normalization, 10001 iterations. Not a one-change experiment; the file's docstring lists what could not be matched | `mdp/mjlab_terms.py` (ported terms, snap-on-draw command, staged command curriculum, shared foot friction) | deploy.yaml from the task: per-joint action scale, gait_phase, command clamp x −1..2, y ±1 |
+| 18 | Unitree's Isaac Lab H1 velocity task (`robots/h1/velocity_env_cfg.py`) applied to H2: every training setting is H1's; only names and geometry are mapped (feet = ankle_pitch links, torso joint = waist joints, base height target H2's 1.0 m). As in H1, turn commands never leave ±0.1 rad/s (no turn curriculum), gait phase and gait reward are ungated, feet clearance is the +20 bonus, and torso contact ends the episode. The file's docstring lists the differences from our baseline | none | deploy.yaml from the task: ungated gait_phase (0.6 s), no history, command clamp x −0.3..1.0, y ±0.3, turn ±0.5 |
 | later | Pose from an animation | large | — |
 
 Gait experiments run in the order 1, 2, 3. Experiment 12 ran first, right after the baseline, and
