@@ -166,6 +166,7 @@ maximum positive reward (one line in the config).
 | `exp12_ang_std_1.py` | `Unitree-H2-Exp12-AngStd1` | run; added to the baseline, then replaced by experiment 14 |
 | `exp13_filtered_turn_reward.py` | `Unitree-H2-Exp13-FilteredTurnReward` | written |
 | `exp14_ang_std_05_bar_04.py` | `Unitree-H2-Exp14-AngStd05Bar04` | run; added to the baseline, so it now equals the baseline |
+| `exp16a_fine_tracking.py` | `Unitree-H2-Exp16a-FineTracking` | written |
 
 Each experiment subclasses `baseline.EnvCfg` and changes only its own setting. Terms that are off
 in the baseline but used by several experiments (`gait`, `gait_phase`) are listed in
@@ -222,6 +223,7 @@ Gazebo eval (`unitree_gz_eval`, default suite, 3 repeats), compared on the `aggr
 | 13 | Filtered turn reward: `track_ang_vel_z` scores a smoothed turn-rate error (moving average of cz − ωz, time constant about 0.5 s) instead of the per-step error, so pelvis sway within each stride isn't punished. Paid and scoring use the same smoothed error | a yaw tracking term with a per-robot filter state; the smoothed error added to the critic observation | none |
 | 14 | σ_ang back to 0.5, paid and scoring, with the turn curriculum's bar lowered from 0.8 to 0.4. Worked; added to the baseline 2026-11-11 | `threshold` parameter on `ang_vel_cmd_levels_fixed_std` | none |
 | 15 | Left/right symmetry: each PPO update also trains on the mirror image of its batch (rsl_rl's symmetry data augmentation). Not written | H2 mirror function for observations and actions; a PPO config for this task | none |
+| 16a | Fine tracking terms next to the coarse ones: `track_lin_vel_xy_fine` (paid σ_lin 0.25, weight 0.5) and `track_ang_vel_z_fine` (paid σ_ang 0.25, weight 0.25), same errors as the existing terms, which stay at paid and scoring σ 0.5. Curricula still score on the coarse terms. A static alternative to the σ curricula (5–5c), which shrink the only term and lose the gradient at large errors. From an H1_2 Isaac Lab setup deployed on hardware (gaetanotorella/H1_2_Squat_Locomotion_RL) | none (Isaac Lab's `track_lin_vel_xy_yaw_frame_exp`, `track_ang_vel_z_exp`) | none |
 | later | Pose from an animation | large | — |
 
 Gait experiments run in the order 1, 2, 3. Experiment 12 ran first, right after the baseline, and
